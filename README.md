@@ -1,5 +1,14 @@
 # 百炼 Python Harness 示例
 
+## 需求与技术架构
+
+- [需求说明](docs/requirements.md)：功能范围、分析流程、默认限制及验收标准。
+- [技术架构](docs/architecture.md)：以 DSH 为唯一智能体运行时，说明应用服务、Metadata MCP、数据模型、API 与部署设计。
+
+以上文档是待实施的第一版设计。当前仓库提供的 CLI 示例使用方式如下。
+
+## 运行现有示例
+
 使用完整 `sdk` profile。百炼路由在 `dsh-home-1/settings.yaml`；MCP 和自定义插件在 `dsh-home-1/profiles/sdk/cordis.patch.yml`。
 
 API Key 使用启动环境中的 `BAILIAN_API_KEY`，或 `dsh-home-1/.env` 中的同名变量，环境变量优先。无需设置 `DEEPSEEK_API_KEY` 或 `DEEPSEEK_BASE_URL`。
