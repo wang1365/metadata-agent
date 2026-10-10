@@ -1,11 +1,61 @@
-# 百炼 Python Harness 示例
+# DSH 元数据服务与百炼 Python Harness 示例
 
 ## 需求与技术架构
 
 - [需求说明](docs/requirements.md)：功能范围、分析流程、默认限制及验收标准。
 - [技术架构](docs/architecture.md)：以 DSH 为唯一智能体运行时，说明应用服务、Metadata MCP、数据模型、API 与部署设计。
 
-以上文档是待实施的第一版设计。当前仓库提供的 CLI 示例使用方式如下。
+- [开发与运行公约](agent.md)：DSH 分析边界、插件与 Skills 优先、代码和设计文档同步提交。
+- [实施记录](docs/implementation.md)：已实现能力、验证范围和待办。
+
+## 元数据服务（本机测试版）
+
+全部分析由 DSH 执行。Python 提供接口与任务管理；MCP 工具由 `dsh/plugins/metadata_tools/` 插件实现和加载，分析方法使用 `dsh/skills/` 原生 Skills。
+
+开发调试（Linux/macOS Bash、Windows Git Bash；WSL 需要在 WSL 内安装依赖）：
+
+```bash
+# 首次配置：复制 .env.example 为 .env 并填写百炼 Key，不要覆盖已有文件。
+bash ./start-dev.sh
+```
+
+脚本同步 Python 依赖，缺少前端依赖时执行 `npm ci`，同时启动 API、Worker 与 Vite。打开 `http://127.0.0.1:5173`，REST 文档为 `http://127.0.0.1:8000/docs`。前端支持热更新，API 支持自动重载；插件、Skills 和 Worker 代码修改后重启脚本。按 `Ctrl+C` 关闭进程树。
+
+端口可在 `.env` 中设置 `METADATA_API_PORT` / `METADATA_UI_PORT`，或在启动环境覆盖。日志位于数据目录的 `dev-logs/`，便于查看 DSH 任务错误。下列命令使用默认本地数据目录：
+
+```bash
+tail -f data/dev-logs/api.log data/dev-logs/worker.log data/dev-logs/frontend.log
+```
+
+生产构建的本机测试方式：
+
+```powershell
+uv sync
+# 尚未配置时：复制 .env.example 为 .env，填写百炼 Key；不要覆盖已有配置。
+cd frontend
+npm ci
+npm run build
+cd ..
+./start-service.ps1
+```
+
+打开 `http://127.0.0.1:8000`，REST 文档为 `/docs`。API 与 Worker 也可分别启动：
+
+```powershell
+uv run uvicorn metadata_service.api:create_app --factory --host 127.0.0.1 --port 8000
+uv run python -m metadata_service.worker
+```
+
+服务自动加载根目录 `.env`，兼容 `dsh-home-1/.env`；启动环境优先。运行数据位于忽略的 `data/`。未配置主密钥时生成本地 `data/.master.key`，请与数据一起妥善备份。样本默认关闭。
+
+```powershell
+uv run pytest --basetemp=data/test-run-local -q
+# 显式调用真实 DSH/百炼，产生模型调用费用；只使用合成 Excel。
+uv run python scripts/smoke_service.py
+uv run python scripts/smoke_lineage.py
+```
+
+完整设计尚未全部验收，当前限制见实施记录。现有 CLI 示例使用方式如下。
 
 ## 运行现有示例
 

@@ -1,6 +1,6 @@
 # 元数据分析智能体技术架构
 
-状态：第一版设计基线，本文描述目标架构，不代表当前代码已实现。
+状态：修订后的第一版设计基线；已开始实现，当前验证范围与待办见 [实施记录](implementation.md)。
 
 更新日期：2026-10-10。
 
@@ -10,9 +10,11 @@
 
 **DSH 是唯一智能体运行时。** 模型调用、Agent 执行循环、工具选择和调用、上下文管理及会话持久化均由 DSH 承担。不实现自建 ReAct 循环，不从自然语言模拟工具调用，不引入第二套 Agent 框架。
 
-自行开发的部分是上层应用服务与业务能力工具。数据库、Excel、SQL 血缘和元数据目录通过 MCP 供 DSH 调用；需要接入 DSH 内部事件时才增加薄层插件，不重写运行时。
+**全部分析由 DSH 执行。** Excel 布局识别与字典解读、键语义、关系推断、ER 建模、SQL 血缘、影响分析和问答都由 DSH 结合 Skills 与证据完成。Python 服务只负责 HTTP、任务生命周期、人工确认、DSH 结果的结构化校验、存储和展示，不能自行推断或补齐结果。
 
-当前仓库已具备官方 Python SDK、`sdk` profile、百炼接入、MySQL MCP 验证和 CLI 示例。HTTP 服务、任务 Worker、服务专用 MCP、结果存储和测试界面均为待实现功能。现有 CLI 保留作为独立示例，不能直接作为服务安全边界。
+**MCP 工具由 DSH 插件实现并加载。** 项目插件使用官方 MCP Client 管理工具接入和生命周期；插件内的工具适配器只做原始 Excel/数据库证据读取、受控查询及结果提交，不提供替代 DSH 的分析算法。插件可以使用 Python MCP SDK 实现 stdio 适配器，语言选择不改变职责边界。
+
+当前仓库保留官方 SDK、`sdk` profile、百炼接入和 CLI 示例，已新增 API、Worker、DSH 插件、原生 Skills、结构化结果存储与测试界面。实现与验证状态单独记录；现有 CLI 不能直接作为服务安全边界。
 
 ## 2. 总体结构与职责
 
@@ -25,10 +27,11 @@ flowchart TB
     SDK[官方 deepseek-harness-sdk]
     DSH[DSH Runtime：sdk profile + 服务补丁]
     MODEL[阿里百炼]
-    MCP[Metadata MCP Server：Python / stdio]
+    PLUGIN[DSH 原生 Metadata Tools 插件]
+    SKILLS[DSH 原生 Skills：字典、关系、血缘、问答]
+    MCP[插件内 MCP 适配器：Python / stdio]
     EXCEL[Excel 模块]
     MYSQL[MySQL 模块]
-    LINEAGE[SQL 血缘模块]
     CATALOG[元数据目录与证据模块]
     STORE[(SQLite + 本地文件)]
     TARGET[(目标 MySQL)]
@@ -38,10 +41,11 @@ flowchart TB
     WORKER --> SDK
     SDK --> DSH
     DSH <--> MODEL
-    DSH <-->|官方 MCP Client| MCP
+    DSH --> SKILLS
+    DSH --> PLUGIN
+    PLUGIN <-->|委托官方 MCP Client| MCP
     MCP --> EXCEL
     MCP --> MYSQL
-    MCP --> LINEAGE
     MCP --> CATALOG
     MYSQL --> TARGET
     EXCEL --> STORE
@@ -56,10 +60,10 @@ flowchart TB
 | Worker | Python + 官方 Harness SDK | 领取任务、创建环境、启动 DSH、订阅事件、超时取消与资源回收 |
 | Agent Runtime | DSH `sdk` profile | 理解目标、探索规划、工具调用、上下文及会话管理 |
 | 模型适配 | DSH `llm-pi-ai` + 百炼 | 模型路由和凭据引用，延续现有配置 |
-| MCP Server | 官方 Python MCP SDK，stdio | 四个模块的工具注册、任务范围校验与结构化返回 |
+| DSH Metadata Tools 插件 | 原生 Cordis 插件 + 官方 MCP Client + 插件内 Python MCP SDK 适配器 | 管理工具生命周期；读取证据、范围限制、受控查询和结果提交 |
 | Excel 能力库 | openpyxl / xlrd | `.xlsx` / `.xls` 内容、坐标、合并区域及格式提取 |
 | MySQL 能力库 | SQLAlchemy 2 + PyMySQL | 结构反射、定义读取、受控数据指标和验证 |
-| 血缘能力库 | SQLGlot | MySQL AST、schema 消解、静态依赖和字段转换分析 |
+| 分析方法 | DSH 原生 Skills | DSH 完成字典、关联、ER、SQL 血缘与问答分析；不存在独立 Python 血缘引擎 |
 | 结果持久化 | SQLite、SQLAlchemy、Alembic | 任务、草稿、快照、证据、审核和问答 |
 | 测试界面 | React、TypeScript、Vite、Ant Design | 数据源、预览确认、任务、图、问答和导出 |
 | 图组件 | React Flow + ELK.js | 自定义表节点、字段连线、布局及局部展开 |
@@ -70,9 +74,11 @@ flowchart TB
 
 ### 3.1 上层可以做什么
 
+Python 封装层包名为 `metadata_service`，不是 Agent。它提供 DSH 智能体的服务接口；真正的智能体运行时、插件及 Skills 属于 DSH。启动命令为 `uv run python -m metadata_service`，API 工厂为 `metadata_service.api:create_app`。
+
 应用服务发起分析和问答，管理数据源、用户修正、任务队列和结果展示。Worker 管理进程与应用状态，通过 SDK 发送任务消息、接收通知和最终执行状态。
 
-连接测试、结果列表及导出等确定性操作直接调用共享能力库，无需模型。业务能力库供 API 和 MCP 复用，避免重复实现数据库或文件逻辑。
+连接测试和范围选择属于接口前置操作，可调用插件的只读 I/O 适配器；结果查询和导出只读取已保存的 DSH 产物。服务层不得直接调用任何业务分析器。上传阶段只验证文件格式、大小和资源限制，不识别业务表块。
 
 Worker 不决定下一步调用哪个工具，不根据模型文本编写工具执行分支。等待用户确认后再发送消息属于业务交互，不属于自建 Agent 循环。
 
@@ -89,17 +95,19 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 
 ### 3.3 插件使用原则
 
-第一版业务能力优先采用 MCP。未来如需自定义 DSH 系统提示注入、内部事件投影或特殊工具策略，可以实现薄层 TypeScript 插件。插件不得直接替代 Agent 循环，stdout 不输出普通日志，避免污染 SDK JSON-RPC 通信。
+插件实现位于 `dsh/plugins/metadata_tools/`：`index.mjs` 是原生 Cordis 插件入口，委托官方 MCP Client；`server.py` 注册任务范围内的 MCP 工具，`excel.py`、`mysql.py` 负责证据 I/O，`capabilities.py` 执行工具契约。Worker 将原生入口复制到隔离 profile 并加载，MCP 适配器由插件启动和回收。
+
+分析方法位于 `dsh/skills/analysis/`，问答位于 `dsh/skills/qa/`，通过官方 Skill 发现机制加载。Python 不实现 Skill 解释器或 Agent 循环。工具不会自动创建关系或血缘；包括真实外键在内，DSH 根据原始约束证据整理并提交结构化关系。插件仅核对声明约束是否有对应原始证据，不能把推断升级成声明。stdout 不输出普通日志。
 
 ## 4. Metadata MCP 工具契约
 
-一个任务启动一个 Metadata MCP Server，内部划分四个逻辑模块。Server 在启动时绑定任务、数据源或快照及预算；工具参数不能自行切换到其他任务或任意连接。
+一个任务由 DSH 插件启动一个 Metadata MCP Server，包含 Excel 证据、MySQL 证据、元数据目录/交付三个工具模块；SQL 血缘是 DSH Skill 分析能力，不是第四个 Python 工具模块。Server 在启动时绑定任务、数据源或快照及预算；工具参数不能自行切换到其他任务或任意连接。
 
 所有工具采用结构化输入与结果校验。公共结果包含 `data`、`evidence_ids`、`warnings`、可选分页游标和当前预算摘要。错误使用稳定错误码，通过 MCP 工具错误返回，不伪装为成功的空结果。分页、批量和样本结果必须有边界。
 
 | 模块 / 工具 | 关键输入 | 关键输出与约束 |
 | --- | --- | --- |
-| Excel `inspect_workbook` | 已绑定文件，可选 Sheet 范围 | Sheet、有效区域、合并单元格和候选表块；不返回整个工作簿 |
+| Excel `inspect_workbook` | 已绑定文件，可选 Sheet 范围 | Sheet、尺寸、合并单元格；表块识别由 DSH 完成，不返回整个工作簿 |
 | Excel `read_region` | Sheet、单元格范围、分页 | 原始值、坐标及布局信息；限制区域大小 |
 | Excel `save_dictionary_draft` | 表、字段、键、来源范围 | 通过校验的草稿版本、告警；确认后的内容不能被自动覆盖 |
 | MySQL `list_objects` | 已选范围、分页 | 数据库、表和视图标识 |
@@ -108,7 +116,6 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 | MySQL `profile_columns` | 对象字段、指标类型 | 有界查询的空值、唯一性等指标及范围 |
 | MySQL `validate_relationship` | 候选两端有序字段组 | 引用匹配、空值等指标；不接受自由 SQL |
 | MySQL `sample_rows` | 对象、所需字段及数量 | 符合发送预算的有限原始样本；关闭样本时拒绝返回值 |
-| 血缘 `analyze_sql_lineage` | 定义证据 ID、已知 schema | 表级/字段级边、表达式、解析告警和未知依赖 |
 | 目录 `search_metadata` | 搜索词、对象类型、分页 | 当前任务或快照内的对象摘要 |
 | 目录 `get_neighbors` | 对象、关联/血缘、方向及深度 | 有界子图，默认一跳 |
 | 目录 `read_evidence` | 证据 ID 列表 | 原始坐标、约束、SQL 片段或验证指标 |
@@ -118,7 +125,7 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 
 工具限制在代码中强制执行。数据库标识从已授权对象集合解析，查询值使用参数绑定；禁止运行模型提交的任意 SQL。查询模板不允许 DML、DDL、存储过程调用、文件操作、锁定查询或其他有副作用操作。
 
-SQLGlot 解析是确定性工具能力；DSH 负责选择定义、解释结果和探索缺失证据。工具解析失败不能让模型凭空补成确定血缘。
+DSH 加载 `metadata-lineage` Skill，读取原始 SQL、schema 与证据，自行分析 JOIN、CTE、表达式以及明确的加工语句，通过 `save_findings` 提交表级/字段级血缘和未知项。Python 不使用 SQLGlot，不解析语义、不生成或修复血缘边。结构校验只检查字段格式、对象引用、证据归属和确认边界，不能证明分析语义正确；语义正确性通过 DSH 场景验收和人工证据审核验证。空值、去重和引用匹配等受控计数只是证据指标，关系是否成立、置信等级和解释由 DSH 决定。
 
 MCP 启动凭据显式配置。DSH 官方 MCP Client 会清理部分敏感环境变量，不假设 MCP 自动继承父进程的 Key、Password、Token 或全部 DSH 配置。
 
@@ -162,7 +169,7 @@ SQLite 使用短事务和有限锁等待，模型调用与数据库采样期间�
 
 ### 6.2 MySQL
 
-配置与连接测试 → 选定范围 → 排队 → DSH 采集结构及定义 → 自主选择候选与受控验证 → SQL 血缘工具解析 → 保存发现 → 发布快照。
+配置与连接测试 → 选定范围 → 排队 → DSH 采集结构及定义 → 自主选择候选与受控验证 → DSH 按 Skill 分析 SQL 血缘 → 保存发现 → 发布快照。
 
 Excel 和 MySQL 结果不会自动合并。数据定义不可见或验证失败时，由结果覆盖范围和告警说明缺失，允许合法的部分成功。
 
@@ -230,7 +237,7 @@ stateDiagram-v2
 
 百炼配置延续 `llm-pi-ai.providers.bailian` 和 `BAILIAN_API_KEY`。服务显式加载本地配置并传给 DSH，不依赖启动脚本所在目录碰巧匹配 `.env`。
 
-动态数据库密码加密保存；本地主密钥通过环境或忽略的 `.env` 提供。MCP 仅取得绑定数据源所需凭据，不把密码放入工具参数、模型上下文或普通日志。模板、API 示例和测试夹具均使用占位符。
+动态数据库密码加密保存；优先通过环境或忽略的 `.env` 提供 `METADATA_MASTER_KEY`。本机未设置时生成被 Git 忽略的 `data/.master.key`，与结果库一同备份、限制访问；这只是本地测试的便利回退。MCP 仅取得绑定数据源所需凭据，不把密码放入工具参数、模型上下文或普通日志。模板、API 示例和测试夹具均使用占位符。
 
 ### 8.2 默认执行配置
 
@@ -253,6 +260,8 @@ stateDiagram-v2
 
 Windows 本机优先，提供一个启动脚本管理 API 和独立 Worker，Worker 使用与项目一致的 Python 环境。生产构建的测试界面由 FastAPI 同源托管，前端开发使用 Vite 代理。
 
+开发启动入口为 `bash ./start-dev.sh`：调用 `metadata_service.dev` 同时管理独立 Worker、Uvicorn reload API 和 Vite 前端，避免 Bash/MSYS PID 与 Windows PID 不一致。默认端口 API 8000、UI 5173；`METADATA_API_PORT`、`METADATA_UI_PORT` 可覆盖，前端代理随 API 端口同步。进程日志写入数据目录 `dev-logs/`，退出回收启动的进程树。API/前端热更新，插件、Skills 与 Worker 修改需要重启。Windows 使用 Git Bash，WSL 需使用 WSL 自己的 Python/Node/uv 环境。构建后的单端口入口为 `start-service.ps1` 或 `uv run python -m metadata_service`。
+
 默认一个 Worker、一个活跃任务；任务队列持久化在 SQLite，领取任务使用事务避免重复执行。部署不需要 Redis、系统 Node.js 参与 DSH 执行或图数据库；前端构建需要 Node.js。
 
 Worker 为任务创建专属进程组或等效进程树管理对象，正常退出和强制取消均回收 DSH 与 MCP 子进程。启动时校验必需 MCP 工具确实可用，不能只以 DSH 进程启动成功作为就绪条件。
@@ -263,7 +272,8 @@ Worker 为任务创建专属进程组或等效进程树管理对象，正常退�
 
 ### 9.1 测试策略
 
-- 能力单测：Excel 布局、约束采集、查询模板、预算、SQL 血缘、证据及发布校验，均可脱离模型测试。
+- 插件 I/O 与契约单测：Excel 原始区域、约束采集、查询模板、预算、证据、结构和发布校验，均可脱离模型测试；不在 Python 测试中运行血缘分析器。
+- DSH 分析验收：通过真实 DSH 执行 Excel 识别、关系推断、ER 和 JOIN/CTE/表达式血缘，按固定证据与人工预期核对分析质量；工具契约测试不能替代该验收。
 - MCP 契约测试：工具 schema、错误码、分页、任务范围、幂等写入、样本限制与工具清单。
 - DSH 集成测试：通过官方 SDK 运行真实 DSH，验证工具发现、调用事件、工具错误反馈、合法结果发布和进程回收；稳定场景使用可控模型端点。
 - API 测试：上传、预览确认、状态机、重试、取消、清理、图查询及答案证据引用。
@@ -275,7 +285,7 @@ Worker 为任务创建专属进程组或等效进程树管理对象，正常退�
 ### 9.2 分阶段交付
 
 1. 架构骨架：FastAPI → Worker → 官方 SDK → DSH → Metadata MCP，完成结构化写入、结果发布与回收验证。
-2. 数据库入口：结构及定义采集、候选验证、静态字段血缘和目录查询。
+2. 数据库入口：插件采集结构及定义，DSH 分析关系与字段血缘，插件提供受控查询和目录。
 3. Excel 入口：布局读取、DSH 识别、人工修正、确认后继续分析。
 4. 完整交互：ER/血缘图、关系审核、元数据问答、导出和两入口端到端验收。
 
@@ -287,7 +297,10 @@ Worker 为任务创建专属进程组或等效进程树管理对象，正常退�
 - [DSH MCP Client](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md)：工具注册、stdio 和环境变量处理。
 - [FastAPI 文件上传](https://fastapi.tiangolo.com/tutorial/request-files/)：HTTP 文件入口。
 - [SQLAlchemy 数据库反射](https://docs.sqlalchemy.org/en/20/core/reflection.html)：结构采集。
-- [SQLGlot 字段血缘](https://sqlglot.com/sqlglot/lineage.html)：结合 schema 的 SQL 静态分析。
 - [React Flow 与 ELK.js](https://reactflow.dev/examples/layout/elkjs-multiple-handles)：字段端口和图布局。
 
 实际实施以项目锁定的依赖版本为准；DSH 的 profile、工具事件和取消能力须通过集成测试确认，文档链接不替代当前安装版本验证。
+
+## 11. 代码与文档一致性
+
+遵循 [agent.md 公约](../agent.md)：代码与需求、架构、相关 README/Skills 同步修改、同步审查、同次提交。职责、工具契约或默认限制发生变化时，交付前必须核对文档与实际代码；实施记录明确未实现及未验证范围。本次边界修订以 DSH 承担全部分析、MCP 属于 DSH 插件为准，替代旧版 SQL 静态分析工具方案。

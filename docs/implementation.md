@@ -1,0 +1,36 @@
+# 实施与验证记录
+
+日期：2026-10-10。设计基线见 [需求](requirements.md)、[架构](architecture.md)，开发约定见 [agent.md](../agent.md)。
+
+## 当前实现
+
+Python 服务包命名为 `metadata_service`，封装 DSH 能力，不能视为一个独立 Agent。DSH 插件和 Skills 保持在 `dsh/`。
+
+- FastAPI 上传/数据源管理、任务接口、预览修正与确认、快照查询、关系审核、问答与 JSON/字段 CSV 导出。
+- 单 Worker、SQLite 持久化、独立执行目录、官方 SDK 启动 DSH、超时与取消处理。
+- DSH 原生插件 `dsh/plugins/metadata_tools/index.mjs` 委托官方 MCP Client，插件内部提供任务隔离的 Excel/MySQL 证据 I/O、受控只读查询及结果提交工具。
+- DSH 原生 Skills 完成字典解读、关系与 ER 分析、SQL 血缘及问答。Python 无 SQL 血缘解析器，不自动生成关系或血缘；真实约束也由 DSH 根据原始证据整理后提交。
+- Pydantic 校验 DSH 输出的格式、对象及证据引用，保存草稿与快照；语义正确性需要 DSH 场景验收。
+- React 测试工作台提供数据源、任务、JSON 预览修正、表和图浏览、审核、问答及图导出。
+- Bash 开发脚本 `start-dev.sh` 与 `metadata_service.dev` 同时启动 API/Worker/前端，提供热更新、端口配置、分进程日志及退出清理；构建后单端口方式使用 `start-service.ps1`。
+
+## 验证范围
+
+- 契约测试覆盖 Excel 确认门禁、发布幂等、问答隔离、密码脱敏、预算与取消、DSH 血缘结果接收及非法引用拒绝、MCP 工具清单。
+- 已使用真实 DSH/百炼验证 Excel 草稿 → 人工确认 → 快照发布 → 快照问答；测试仅使用合成字典，不访问业务数据库。
+- 前端 TypeScript 与生产构建通过。原生插件入口修订后，真实 DSH Excel → 确认 → 发布 → 问答流程再次通过。
+- 新增真实 DSH 合成 SQL 验证：DSH 从 CTE 与表达式定义证据中自行产出 `users.id → v_users.user_id`、`users.amount → v_users.doubled` 等血缘边，结构化保存并保留证据引用；Python 未进行语义分析。该测试不等于 MySQL 全入口或复杂 SQL 全覆盖验收。
+- 本次 6 项契约测试通过，含 MySQL 插件仅采集原始证据、不自动生成结果的验证。
+- `metadata_service` 重命名后 6 项测试、真实 DSH CTE/表达式血缘和前端构建再次通过；Git Bash 脚本语法及实际三进程启动通过，API 与 Vite 代理返回健康状态，终端 Ctrl+C 后 8000/5173 端口释放且测试服务进程退出。浏览器自动化连接不可用，未声称完成浏览器端到端交互验收。
+
+## 尚未完成的目标
+
+本文件记录实施进度，不将设计全部列为已交付：
+
+- MySQL 两入口端到端与 DSH JOIN/CTE/复杂表达式血缘质量验收尚需独立测试库与固定夹具验证。
+- Excel 当前为 JSON 草稿编辑，尚非完整的可视化区域映射编辑器。
+- 图当前是表节点与字段标签、一跳查询；字段端口、完整分页展开与大规模性能验收尚未完成。
+- 任务原始文件清理 API、关系 CSV、数据库迁移体系及更强的异常退出子进程回收仍待实施。
+- 这是本机单用户测试服务，尚未实现多用户认证、授权与生产部署保障。
+
+后续任何实现或边界调整，必须同步更新本记录和相关需求、架构、README、Skills，不能用设计状态替代实际验证状态。

@@ -19,3 +19,7 @@ node_modules/
 dsh-home-1/sessions/
 dsh-home-1/storages/
 dsh-home-1/.anonymous-user-id
+data/
+frontend/dist/
+.pytest_cache/
+.ruff_cache/
