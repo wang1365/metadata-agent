@@ -1,25 +1,67 @@
-# Python-generated files
+# Python bytecode and package outputs
 __pycache__/
-*.py[oc]
+*.py[cod]
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.eggs/
 
 # Virtual environments
-.venv
+.venv/
+venv/
+.tox/
+.nox/
 
-# Local credentials and generated Harness state
+# Local credentials (keep safe configuration examples)
 .env
 .env.*
 !.env.example
 .credentials.yaml
+.master.key
+
+# Dependencies and build caches (keep uv.lock and package-lock.json)
 node_modules/
+.vite/
+*.tsbuildinfo
+.uv-cache/
 .dsh-module-fallback/
+
+# Generated Harness sessions and CLI workspace; retain profiles/settings/plugins
 dsh-home-1/sessions/
 dsh-home-1/storages/
 dsh-home-1/.anonymous-user-id
-data/
-frontend/dist/
+/workspace-1/
+
+# Service uploads, credentials, databases, task outputs and diagnostics
+/data/
+*.log
+*.log.*
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Test, lint and type-check artifacts
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# Local editor and operating system artifacts
+.idea/
+.history/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
