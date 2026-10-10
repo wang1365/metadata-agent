@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local credentials and generated Harness state
+.env
+.env.*
+!.env.example
+.credentials.yaml
+node_modules/
+.dsh-module-fallback/
+dsh-home-1/sessions/
+dsh-home-1/storages/
+dsh-home-1/.anonymous-user-id
