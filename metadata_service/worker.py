@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -49,6 +50,7 @@ def work(store, once=False):
     for job in store.list("job"):
         if job["status"] == "running":
             store.update(job["id"], status="failed", stage="执行中断，可显式重试", error="EXECUTION_INTERRUPTED")
+            store.log(job["id"], "task.interrupted", "Worker 重启，原执行中断，可显式重试", level="error")
     while True:
         queued = sorted([job for job in store.list("job") if job["status"] == "queued"], key=lambda j: j["created"])
         if not queued:
@@ -57,6 +59,20 @@ def work(store, once=False):
             time.sleep(1)
             continue
         job = store.claim(queued[0]["id"])
+        store.log(job["id"], "task.started", "Worker 已领取任务，准备启动 DSH 子进程")
+        cursor = 0
+
+        def relay():
+            nonlocal cursor
+            while True:
+                page = store.logs(job["id"], cursor)
+                for item in page["events"]:
+                    if item.get("origin_pid") != os.getpid():
+                        print(json.dumps(item, ensure_ascii=False), file=sys.stderr, flush=True)
+                cursor = page["next_cursor"]
+                if not page["has_more"]:
+                    break
+
         folder = store.settings.job_dir(job["id"])
         folder.mkdir(parents=True, exist_ok=True)
         process = None
@@ -76,7 +92,9 @@ def work(store, once=False):
                     start_new_session=os.name != "nt",
                 )
                 started = time.monotonic()
+                heartbeat = started
                 while process.poll() is None:
+                    relay()
                     current = store.get(job["id"], "job")
                     if current["cancel_requested"] or time.monotonic() - started > store.settings.execution_timeout:
                         stop_tree(process)
@@ -86,7 +104,20 @@ def work(store, once=False):
                             stage="已停止",
                             error=None if current["cancel_requested"] else "EXECUTION_TIMEOUT",
                         )
+                        store.log(
+                            job["id"],
+                            "task.stopped",
+                            "任务已取消" if current["cancel_requested"] else "执行超过时限，已回收进程",
+                            level="warning" if current["cancel_requested"] else "error",
+                        )
                         break
+                    if time.monotonic() - heartbeat >= 15:
+                        store.log(
+                            job["id"],
+                            "worker.heartbeat",
+                            f"执行进程仍在运行，已运行 {int(time.monotonic() - started)} 秒；等待 DSH 或工具事件",
+                        )
+                        heartbeat = time.monotonic()
                     time.sleep(0.5)
                 current = store.get(job["id"], "job")
                 if current["status"] == "running":
@@ -96,9 +127,11 @@ def work(store, once=False):
                         stage="执行结束",
                         error=None if current["cancel_requested"] else "EXECUTION_INTERRUPTED",
                     )
+                    store.log(job["id"], "task.interrupted", "运行进程退出，任务未正常交付结果", level="error")
             finally:
                 if process:
                     stop_tree(process)
+                relay()
         if once:
             return
 

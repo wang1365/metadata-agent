@@ -1,8 +1,11 @@
 import copy
+import json
+import os
+import sys
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, MetaData, String, Table, create_engine, event, select, update
+from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, delete, event, select, update
 
 from .models import Findings
 
@@ -40,7 +43,81 @@ class Store:
             Column("created", String),
             Column("payload", JSON),
         )
+        self.events = Table(
+            "task_events",
+            metadata,
+            Column("seq", Integer, primary_key=True, autoincrement=True),
+            Column("job_id", String, index=True, nullable=False),
+            Column("time", String, nullable=False),
+            Column("payload", JSON, nullable=False),
+        )
         metadata.create_all(self.engine)
+
+    def log(self, job_id, event_type, message, *, level="info", tool=None, duration_ms=None, code=None, stage=None):
+        """Only callers' fixed summaries belong here, never raw DSH/tool payloads."""
+        job = self.get(job_id, "job")
+        payload = {
+            "execution_id": job.get("execution_id"),
+            "origin_pid": os.getpid(),
+            "type": event_type,
+            "level": level,
+            "message": message,
+        }
+        payload.update(
+            {k: v for k, v in {"tool": tool, "duration_ms": duration_ms, "code": code}.items() if v is not None}
+        )
+        timestamp = now()
+        with self.engine.begin() as connection:
+            seq = connection.execute(
+                self.events.insert().values(job_id=job_id, time=timestamp, payload=payload)
+            ).inserted_primary_key[0]
+            cutoff = connection.execute(
+                select(self.events.c.seq)
+                .where(self.events.c.job_id == job_id)
+                .order_by(self.events.c.seq.desc())
+                .offset(4999)
+                .limit(1)
+            ).scalar()
+            if cutoff:
+                connection.execute(
+                    delete(self.events).where(self.events.c.job_id == job_id, self.events.c.seq < cutoff)
+                )
+        if stage:
+
+            def progress(payload):
+                if payload["status"] == "running" and not payload["cancel_requested"]:
+                    payload["stage"] = stage
+                    payload["last_activity_at"] = timestamp
+
+            self.mutate(job_id, progress)
+        record = {"seq": seq, "job_id": job_id, "time": timestamp, **payload}
+        print(json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
+        return record
+
+    def logs(self, job_id, after=0, limit=200):
+        job = self.get(job_id, "job")
+        with self.engine.connect() as connection:
+            first = connection.execute(
+                select(self.events.c.seq).where(self.events.c.job_id == job_id).order_by(self.events.c.seq).limit(1)
+            ).scalar()
+            rows = (
+                connection.execute(
+                    select(self.events)
+                    .where(self.events.c.job_id == job_id, self.events.c.seq > after)
+                    .order_by(self.events.c.seq)
+                    .limit(limit + 1)
+                )
+                .mappings()
+                .all()
+            )
+        items = [{"seq": row["seq"], "job_id": job_id, "time": row["time"], **row["payload"]} for row in rows[:limit]]
+        return {
+            "events": items,
+            "next_cursor": items[-1]["seq"] if items else after,
+            "has_more": len(rows) > limit,
+            "truncated": bool(after and first and after < first - 1),
+            "status": job["status"],
+        }
 
     def create(self, kind, data, record_id=None):
         record_id = record_id or uid()

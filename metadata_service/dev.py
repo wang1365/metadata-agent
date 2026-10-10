@@ -50,6 +50,8 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupted)
     with ExitStack() as stack:
+        worker_output = stack.enter_context((logs / "worker.log").open("a+", encoding="utf-8"))
+        worker_output.seek(0, 2)
         try:
             for name, command in commands:
                 log = stack.enter_context((logs / (name + ".log")).open("a", encoding="utf-8"))
@@ -68,6 +70,9 @@ def main():
                 flush=True,
             )
             while True:
+                for line in worker_output.readlines():
+                    if line.startswith("{"):
+                        print(line.rstrip(), flush=True)
                 for name, process in processes:
                     if process.poll() is not None:
                         raise RuntimeError(f"{name} exited ({process.returncode}); inspect {logs / (name + '.log')}")

@@ -60,6 +60,17 @@ def main():
         print(json.dumps(job, ensure_ascii=True))
         assert job["status"] == "succeeded", str(settings.data_dir / "jobs" / qa["task_id"] / "runner.log")
         assert not any("mysql" in name for name in job["observed_tools"])
+        events = client.get(f"/api/v1/analyses/{qa['task_id']}/logs").json()["events"]
+        event_types = {event["type"] for event in events}
+        assert {
+            "mcp.ready",
+            "model.request",
+            "model.response",
+            "tool.started",
+            "tool.completed",
+            "task.finished",
+        } <= event_types
+        assert events[-1]["type"] == "task.finished"
         print("LIVE_DSH_EXCEL_AND_QA_OK", settings.data_dir)
 
 

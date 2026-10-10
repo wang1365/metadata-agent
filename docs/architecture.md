@@ -211,6 +211,7 @@ stateDiagram-v2
 | `GET /sources/{id}/objects` | 分页列出可选数据库/表；Excel 的已识别对象由草稿接口提供 |
 | `POST /analyses` | 接收 Source ID、范围和分析选项，返回任务 ID |
 | `GET /analyses/{id}` | 状态、阶段、预算、告警及快照引用 |
+| `GET /analyses/{id}/logs` | `after` 游标（默认 0）、`limit`（默认 200，最多 500）；返回事件、next_cursor、has_more、truncated、任务状态 |
 | `GET /analyses/{id}/preview` | Excel 表块、映射、草稿版本及证据坐标 |
 | `PUT /analyses/{id}/mapping` | 保存人工修正，校验草稿版本避免覆盖并发修改 |
 | `POST /analyses/{id}/confirm` | 确认草稿并入队继续，重复确认不重复派发 |
@@ -269,6 +270,18 @@ Worker 为任务创建专属进程组或等效进程树管理对象，正常退�
 清理接口只接受任务 ID，服务解析目录归属；禁止传入任意文件路径。保留已发布结构化快照，对被清理的原始证据明确显示不可用，不误指向其他任务文件。
 
 ## 9. 测试与实施顺序
+
+### 过程日志实现
+
+SQLite 独立 `task_events` 表保存有序 `seq`、任务 ID、时间和事件负载，不把日志追加到任务大 JSON 中。每任务保留最近 5000 条，通过任务范围过滤和递增游标分页；确认后继续执行保留同一任务日志，并以 execution_id 区分两次执行。重试任务有独立日志，原任务保持可查询。首次启动通过建表自动兼容现有本地结果库，正式迁移体系仍在待办中。
+
+`metadata_service.progress.DSHProgress` 订阅官方 SDK `session.event`，投影 `request/header`、`assistant/message`、`turn/end` 的安全摘要，不读取模型正文。`request/header` 是 DSH 任务请求事件，不声称对应每次底层模型 API 调用。MCP 插件 `server.logged_tool` 保留原工具签名、权限与返回值，在真实工具执行前后记录名称、耗时、有限计数或安全错误码；分析、推断和工具选择继续由 DSH 执行。
+
+Worker 记录领取、15 秒心跳、取消/超时/中断，按游标将 runner/MCP 事件转发到自己的 stderr。开发监督进程将 worker.log 中的结构化事件同步输出到终端；runner 本地 stderr 仍保留在任务目录 runner.log。MCP stdout 与 SDK JSON-RPC stdout 不用于普通日志。
+
+API 只交付事件投影，不将原始 runner.log 或 DSH 会话暴露给前端。日志由固定消息、数值、受控工具名和安全错误码构成，不记录自由输入、模型正文、SQL、原始样本、凭据或异常原文。错误原文仍由 DSH 工具协议交回运行时处理；界面错误不会把已恢复的工具失败误当整任务失败。阶段更新检查任务仍运行且未取消，晚到事件可留存但不能改写终态。
+
+前端 `TaskLogs.tsx` 在抽屉打开时按游标轮询，合并去重、保留最近 2000 条，支持筛选、跟随与下载窗口；终态变化立即及约 2 秒后各补读一次，仍有分页时继续读取。心跳是进程存活证据，不表示模型健康；没有采集过的旧任务显示空状态。日志功能只投影运行过程，不引入 Agent 执行循环；Skills 分析契约保持不变。
 
 ### 9.1 测试策略
 

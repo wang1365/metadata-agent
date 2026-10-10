@@ -150,7 +150,15 @@ def create_app(settings=None):
 
     @app.post(prefix + "/analyses", status_code=202)
     def start_analysis(body: AnalysisRequest):
-        return {"task_id": store.new_job(**body.model_dump())}
+        job_id = store.new_job(**body.model_dump())
+        store.log(job_id, "task.queued", "任务已入队，等待 Worker")
+        return {"task_id": job_id}
+
+    @app.get(prefix + "/analyses/{job_id}/logs")
+    def task_logs(job_id: str, after: int = 0, limit: int = 200):
+        if after < 0 or not 1 <= limit <= 500:
+            raise ValueError("INVALID_PAGINATION")
+        return store.logs(job_id, after, limit)
 
     @app.get(prefix + "/analyses")
     def jobs():
@@ -188,6 +196,7 @@ def create_app(settings=None):
             payload.update(confirmed=True, status="queued", stage="等待继续分析")
 
         store.mutate(job_id, apply)
+        store.log(job_id, "task.confirmed", "人工确认已接收，等待继续分析")
         return {"task_id": job_id}
 
     @app.post(prefix + "/analyses/{job_id}/cancel", status_code=202)
@@ -199,6 +208,7 @@ def create_app(settings=None):
                     payload.update(status="cancelled", stage="已取消")
 
         result = store.mutate(job_id, apply)
+        store.log(job_id, "task.cancel_requested", "已收到取消请求", level="warning")
         return {"task_id": job_id, "status": result["status"], "cancel_requested": result["cancel_requested"]}
 
     @app.post(prefix + "/analyses/{job_id}/retry", status_code=202)
@@ -220,7 +230,9 @@ def create_app(settings=None):
             "conversation_id",
         ]
         extra = {key: previous[key] for key in keys if key in previous}
-        return {"task_id": store.new_job(previous["source_id"], retry_of=job_id, **extra)}
+        retry_id = store.new_job(previous["source_id"], retry_of=job_id, **extra)
+        store.log(retry_id, "task.queued", "重试任务已入队，等待 Worker")
+        return {"task_id": retry_id}
 
     @app.get(prefix + "/snapshots")
     def snapshots():
@@ -292,6 +304,7 @@ def create_app(settings=None):
         else:
             conversation_id = store.create("conversation", {"snapshot_id": snapshot_id})
         job_id = store.new_job(question=body.question, bound_snapshot_id=snapshot_id, conversation_id=conversation_id)
+        store.log(job_id, "task.queued", "问答任务已入队，等待 Worker")
         return {"task_id": job_id, "conversation_id": conversation_id}
 
     @app.get(prefix + "/conversations/{conversation_id}")

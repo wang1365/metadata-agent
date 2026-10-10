@@ -10,6 +10,7 @@ import sys
 from deepseek_harness import DeepSeekHarness
 
 from .config import ROOT, get_settings
+from .progress import DSHProgress, safe_error_code
 from .store import Store
 
 
@@ -131,7 +132,9 @@ def prepare_runtime(store, job_id):
 
 def run_task(store, job_id):
     job = store.active(job_id)
+    store.log(job_id, "runtime.prepare", "准备隔离 workspace、profile 与插件配置", stage="准备运行环境")
     home, workspace, env = prepare_runtime(store, job_id)
+    store.log(job_id, "runtime.prepared", "运行配置准备完成，即将启动 DSH", stage="初始化 DSH 与 MCP")
     if job.get("question"):
         history = [answer for answer in store.list("answer") if answer["conversation_id"] == job["conversation_id"]][
             -10:
@@ -157,11 +160,13 @@ def run_task(store, job_id):
             prompt += "逐批采集所选对象，探索主外键、候选关联与视图血缘，保存发现并 finalize_snapshot。"
 
     observed = set()
+    progress = DSHProgress(store, job_id)
 
     def notification(note):
         if note.method != "session.event":
             return
         event = note.payload.get("event", {})
+        progress(event)
         if event.get("type") == "request/header":
             names = {tool["name"] for tool in event["data"]["header"]["tools"]}
             if any(name != "skill" and not name.startswith("mcp__metadata__") for name in names):
@@ -183,6 +188,7 @@ def run_task(store, job_id):
             request_timeout_seconds=180,
             shutdown_timeout_seconds=5,
         ) as harness:
+            store.log(job_id, "runtime.ready", "DSH 初始化完成，提交任务消息", stage="提交任务消息")
             result = harness.run(prompt, session_id="metadata-" + job["execution_id"], on_notification=notification)
         current = store.get(job_id, "job")
         if current["cancel_requested"]:
@@ -208,10 +214,20 @@ def run_task(store, job_id):
                     observed_tools=sorted(observed),
                 )
 
-        store.mutate(job_id, finish)
+        finished = store.mutate(job_id, finish)
+        if finished["status"] == status and not finished["cancel_requested"]:
+            store.log(
+                job_id, "task.finished", "任务执行结束", level="error" if status == "failed" else "info", code=status
+            )
     except Exception as exc:
         # SDK diagnostics can include task/sample content. Keep them only in ignored logs.
-        print(type(exc).__name__, str(exc), file=sys.stderr)
+        store.log(
+            job_id,
+            "runtime.failed",
+            "DSH 执行失败；请根据事件阶段定位，必要时检查本机运行诊断",
+            level="error",
+            code=safe_error_code(exc),
+        )
 
         def fail(payload):
             if payload["status"] == "running" and not payload["cancel_requested"]:
@@ -224,7 +240,18 @@ if __name__ == "__main__":
     store = Store(get_settings())
     try:
         run_task(store, sys.argv[1])
-    except Exception:
-        print("RUNNER_STARTUP_FAILED", file=sys.stderr)
-        store.update(sys.argv[1], status="failed", stage="运行时启动失败", error="RUNTIME_STARTUP_FAILED")
+    except Exception as exc:
+        store.log(
+            sys.argv[1],
+            "runtime.startup_failed",
+            "运行时启动失败：请检查模型凭据、profile 和插件配置",
+            level="error",
+            code=safe_error_code(exc),
+        )
+
+        def failed(payload):
+            if payload["status"] == "running" and not payload["cancel_requested"]:
+                payload.update(status="failed", stage="运行时启动失败", error="RUNTIME_STARTUP_FAILED")
+
+        store.mutate(sys.argv[1], failed)
         raise SystemExit(1)
