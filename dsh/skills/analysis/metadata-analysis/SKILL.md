@@ -19,12 +19,13 @@ DSH 负责全部分析与结构化结果生成，不编写或运行代码。插�
 
 任务范围由用户勾选的表/视图确定。list_objects 只返回所选范围，必须完整覆盖；不自动加入外键或 SQL 引用的范围外对象。外部引用保留在原始证据中并写入 warnings，不生成缺少范围内端点的关系/血缘边。按表选择的任务只读取所选视图定义，不读取全库例程/触发器。需要跨范围分析时，由用户另建任务扩大选择；不要绕过工具限制。
 
-1. list_objects 后以最多 20 张表一批 describe_tables，完整覆盖选中范围。工具只返回并保存原始结构证据，不生成结果。将返回的表字段及真实键整理为 tables，表与字段附上 evidence_ids；将真实外键整理为 origin=constraint 的 relationships，保留有序字段组与证据。使用 save_findings(mode=merge) 按 1–5 张表的小批保存；最多 20 张表，字段多时继续缩小。全部引用端点存在后再提交关系批次，避免跨批未知对象。
-2. 使用 search_metadata 分页理解业务语义，必要时 profile_columns、validate_relationship；只有用户启用样本才调用 sample_rows。
-3. 采样验证只支持候选，不能证明全量唯一性或把候选标成数据库约束。工具预算耗尽后记录告警，不绕过预算。
-4. 涉及 SQL 血缘时加载 metadata-lineage skill。使用 get_sql_definition 获取原始定义，自己结合 schema 分析来源、表达式和加工流向，再通过 save_findings 提交边。没有 analyze_sql_lineage 工具或 Python 血缘解析器。动态 SQL、缺失定义和无法消解的引用保持未知并写入 warnings。
-5. save_findings 优先 mode=merge 只提交本批新增/修改对象，不重复提交全量目录。tables 按 name 合并，关系与血缘按端点合并，已有条目保留。mode=replace 才是完整替换，需要完整文档并保留有证据约束。候选关联使用 origin=inferred，必须有证据和解释；ER 图与血缘的全部语义判断由你完成。
-6. finalize_snapshot 后才可报告完成。若工具尚未完成或无发布结果，不能说已成功。
+1. list_objects 后优先以 10–20 张表一批 describe_tables，完整覆盖选中范围；字段多时缩小批次。插件批量读取原始结构，不生成结果；本轮重复读取同批会复用证据，只有明确需要重新采集才用 refresh=true。
+2. 审阅结构后，优先调用 save_findings(findings={}, mode="merge", schema_refs=[{"evidence_id":"<本批证据ID>","names":["<已审阅表名>"]}]) 明确接收所选原始表结构，每次最多20张，无需重写字段、类型、注释和键；工具只复制你明确引用的原始记录，不自动接收其他表，也不生成关系或血缘。schema_refs 是工具参数，不是 findings 根字段。需要修改结构时才提交 findings.tables 完整对象，且不得与本次引用的表重名。真实外键仍由你整理为 origin=constraint 的 relationships，保留有序字段组与证据。全部引用端点保存后再提交关系批次，避免跨批未知对象。
+3. 直接利用本批已返回证据理解业务语义，避免重复 read_evidence/search_metadata 获取相同完整字段。只有针对具体待核验候选才调用 profile_columns、validate_relationship，不机械遍历所有表/字段做采样；同表所需指标尽量合为一次 profile_columns（最多20列）。只有用户启用样本才调用 sample_rows。
+4. 采样验证只支持候选，不能证明全量唯一性或把候选标成数据库约束。工具预算耗尽后记录告警，不绕过预算。
+5. 涉及 SQL 血缘时加载 metadata-lineage skill。使用 get_sql_definition 获取原始定义，自己结合 schema 分析来源、表达式和加工流向，再通过 save_findings 提交边；已采集定义会复用本轮证据。没有 analyze_sql_lineage 工具或 Python 血缘解析器。动态 SQL、缺失定义和无法消解的引用保持未知并写入 warnings。
+6. save_findings 优先 mode=merge 只提交本批新增/修改对象，不重复提交全量目录。tables 按 name 合并，关系与血缘按端点合并，已有条目保留。mode=replace 才是完整替换，需要完整文档并保留有证据约束。候选关联使用 origin=inferred，必须有证据和解释；ER 图与血缘的全部语义判断由你完成。
+7. finalize_snapshot 后才可报告完成。若工具尚未完成或无发布结果，不能说已成功。
 
 ## 结果约定
 

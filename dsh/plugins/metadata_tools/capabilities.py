@@ -5,7 +5,7 @@ from typing import Literal
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from metadata_service.models import Findings, FindingsInput
+from metadata_service.models import Findings, FindingsInput, SchemaReference
 from metadata_service.store import uid
 
 from . import excel
@@ -131,10 +131,37 @@ class Capabilities:
         finally:
             database.close()
 
-    def describe_tables(self, names: list[str]) -> dict:
-        """Collect raw schema evidence for up to 20 objects. DSH structures all analysis results."""
+    @serialized_save
+    def describe_tables(self, names: list[str], refresh: bool = False) -> dict:
+        """Batch-read 1..20 selected objects. Reuse this execution's evidence unless refresh=true; review it before save_findings(schema_refs=...)."""
         if not 1 <= len(names) <= 20 or len(set(names)) != len(names):
             raise ValueError("BATCH_LIMIT: provide 1..20 unique tables")
+        job = self.job()
+        self.source("mysql")
+        if job.get("tables") and not set(names) <= set(job["tables"]):
+            raise ValueError("TABLE_OUTSIDE_TASK")
+        if not refresh:
+            for ref, evidence in reversed(list(job["evidence"].items())):
+                if (
+                    evidence["kind"] == "mysql_schema"
+                    and evidence["locator"].get("execution_id") == job.get("execution_id")
+                    and set(evidence["locator"]["tables"]) == set(names)
+                ):
+                    data = evidence["data"]
+                    return {
+                        "tables": data["tables"],
+                        "foreign_keys": data["foreign_keys"],
+                        "warnings": data.get("warnings", []),
+                        "views_with_definitions": list(data.get("definitions", {})),
+                        "evidence_ids": [ref],
+                        "cached": True,
+                    }
+                if (
+                    evidence["kind"] == "mysql_schema"
+                    and evidence["locator"].get("execution_id") == job.get("execution_id")
+                    and set(names) & set(evidence["locator"]["tables"])
+                ):
+                    break  # A newer overlapping read invalidates this older batch.
         database = self.mysql()
         try:
             if not set(names) <= set(self.allowed_tables(database)):
@@ -144,18 +171,46 @@ class Capabilities:
             raise ValueError("MYSQL_OPERATION_FAILED: check connectivity and metadata privileges") from None
         finally:
             database.close()
+        data = {"tables": tables, "foreign_keys": foreign_keys, "definitions": definitions, "warnings": warnings}
         evidence_id = self.store.evidence(
-            self.job_id, "mysql_schema", {"tables": names}, {"tables": tables, "foreign_keys": foreign_keys}
+            self.job_id, "mysql_schema", {"tables": names, "execution_id": job.get("execution_id")}, data
         )
         return {
             "tables": tables,
             "foreign_keys": foreign_keys,
             "views_with_definitions": list(definitions),
             "evidence_ids": [evidence_id],
+            "warnings": warnings,
+            "cached": False,
         }
 
+    @serialized_save
     def get_sql_definition(self, name: str, kind: str = "view") -> dict:
         """Read view, routine or trigger definition inside the task's selected database."""
+        job = self.job()
+        self.source("mysql")
+        if job.get("tables") and (kind != "view" or name not in job["tables"]):
+            raise ValueError("DEFINITION_OUTSIDE_TASK")
+        for ref, evidence in reversed(list(job["evidence"].items())):
+            if evidence["locator"].get("execution_id") != job.get("execution_id"):
+                continue
+            if (
+                evidence["kind"] == "sql_definition"
+                and evidence["locator"].get("name") == name
+                and evidence["locator"].get("kind") == kind
+            ):
+                return {"sql": evidence["data"]["sql"], "evidence_ids": [ref], "cached": True}
+            if kind == "view" and evidence["kind"] == "mysql_schema" and name in evidence["locator"]["tables"]:
+                if name not in evidence["data"].get("definitions", {}):
+                    return {"sql": None, "warnings": ["DEFINITION_UNAVAILABLE"], "cached": True}
+                sql = evidence["data"]["definitions"][name]
+                ref = self.store.evidence(
+                    self.job_id,
+                    "sql_definition",
+                    {"name": name, "kind": kind, "execution_id": job.get("execution_id")},
+                    {"sql": sql},
+                )
+                return {"sql": sql, "evidence_ids": [ref], "cached": True}
         database = self.mysql()
         try:
             if kind != "view" and self.job().get("tables"):
@@ -169,7 +224,12 @@ class Capabilities:
             database.close()
         if not sql:
             return {"sql": None, "warnings": ["DEFINITION_UNAVAILABLE"]}
-        evidence_id = self.store.evidence(self.job_id, "sql_definition", {"name": name, "kind": kind}, {"sql": sql})
+        evidence_id = self.store.evidence(
+            self.job_id,
+            "sql_definition",
+            {"name": name, "kind": kind, "execution_id": job.get("execution_id")},
+            {"sql": sql},
+        )
         return {"sql": sql, "evidence_ids": [evidence_id]}
 
     def sample_rows(self, table: str, columns: list[str], limit: int = 20) -> dict:
@@ -312,10 +372,46 @@ class Capabilities:
         return {"evidence": [evidence[ref] for ref in evidence_ids]}
 
     @serialized_save
-    def save_findings(self, findings: FindingsInput, mode: Literal["replace", "merge"] = "replace") -> dict:
-        """Save typed findings. Prefer mode=merge for <=20 tables or relation/lineage batches, without rewriting the full draft."""
+    def save_findings(
+        self,
+        findings: FindingsInput,
+        mode: Literal["replace", "merge"] = "replace",
+        schema_refs: list[SchemaReference] | None = None,
+    ) -> dict:
+        """Save DSH findings. With mode=merge, explicitly adopt <=20 reviewed MySQL tables via schema_refs (evidence_id + names) instead of reprinting columns. References copy raw structure only, never generate relationships or lineage."""
         job = self.job()
         self.source()
+        if schema_refs:
+            if mode != "merge":
+                raise ValueError("SCHEMA_REFS_REQUIRE_MERGE")
+            if len(schema_refs) > 20:
+                raise ValueError("BATCH_LIMIT")
+            self.source("mysql")
+            chunk = FindingsInput.model_validate(findings).model_dump()
+            adopted = {table["name"] for table in chunk["tables"]}
+            for value in schema_refs:
+                reference = SchemaReference.model_validate(value)
+                evidence = job["evidence"].get(reference.evidence_id, {})
+                if evidence.get("kind") != "mysql_schema":
+                    raise ValueError("SCHEMA_EVIDENCE_REQUIRED")
+                raw = {table["name"]: table for table in evidence["data"]["tables"]}
+                for name in reference.names:
+                    if name not in raw:
+                        raise ValueError("TABLE_NOT_IN_EVIDENCE")
+                    if name in adopted:
+                        raise ValueError("DUPLICATE_SCHEMA_REFERENCE")
+                    table = {
+                        key: raw[name][key]
+                        for key in ("name", "kind", "comment", "columns", "keys")
+                        if key in raw[name]
+                    }
+                    table["evidence_ids"] = [reference.evidence_id]
+                    table["columns"] = [
+                        {**column, "evidence_ids": [reference.evidence_id]} for column in table["columns"]
+                    ]
+                    chunk["tables"].append(table)
+                    adopted.add(name)
+            findings = chunk
         parsed = Findings.model_validate(self.merge_input(findings, mode))
         if self.source()["type"] == "mysql" and job.get("tables"):
             if not {table.name for table in parsed.tables} <= set(job["tables"]):

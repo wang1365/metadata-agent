@@ -43,6 +43,8 @@ def logged_tool(store, job_id, name, function):
             raise
         summary = "工具执行完成"
         if isinstance(result, dict):
+            if result.get("cached"):
+                summary += "：复用本轮已采集证据"
             counts = [
                 f"{label} {len(result[key])}"
                 for key, label in [("tables", "表"), ("objects", "对象"), ("evidence_ids", "证据")]

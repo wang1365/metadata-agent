@@ -111,7 +111,7 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 | Excel `read_region` | Sheet、单元格范围、分页 | 原始值、坐标及布局信息；限制区域大小 |
 | Excel `save_dictionary_draft` | 表、字段、键、来源范围 | 通过校验的草稿版本、告警；确认后的内容不能被自动覆盖 |
 | MySQL `list_objects` | 无输入，范围由任务绑定 | 当前任务所选表和视图标识，不向模型返回范围外目录 |
-| MySQL `describe_tables` | 范围内表 ID 列表 | 字段、键、索引、注释等结构证据 |
+| MySQL `describe_tables` | names（1–20个范围内对象）、refresh（默认false） | 批量原始字段/键/外键/注释、定义可用性、证据ID、warnings和cached；不写入草稿 |
 | MySQL `get_sql_definition` | 对象 ID、类型 | SQL 定义及可见性告警 |
 | MySQL `profile_columns` | 对象字段、指标类型 | 有界查询的空值、唯一性等指标及范围 |
 | MySQL `validate_relationship` | 候选两端有序字段组 | 引用匹配、空值等指标；不接受自由 SQL |
@@ -119,7 +119,7 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 | 目录 `search_metadata` | 搜索词、对象类型、分页 | 当前任务或快照内的对象摘要 |
 | 目录 `get_neighbors` | 对象、关联/血缘、方向及深度 | 有界子图，默认一跳 |
 | 目录 `read_evidence` | 证据 ID 列表 | 原始坐标、约束、SQL 片段或验证指标 |
-| 目录 `save_findings` | 结构化分批发现、幂等键 | 草稿结果 ID、校验错误或告警 |
+| 目录 `save_findings` | findings、mode=replace/merge、可选schema_refs（证据ID+指定表名） | 草稿版本及表数量，或结构/证据/范围校验错误 |
 | 目录 `finalize_snapshot` | 草稿版本、覆盖范围、未解决项 | 合法快照 ID、发布状态或校验错误 |
 | 目录 `save_answer` | 答案正文、证据 ID、会话消息 ID | 保存后的答案 ID；引用必须属于绑定快照 |
 
@@ -155,7 +155,15 @@ DSH 通过 `save_findings` 分批写入，Pydantic 校验对象引用、字段�
 
 `save_findings` 和 `save_dictionary_draft` 的 findings 参数使用 `FindingsInput` 显式模型，MCP 向 DSH 提供 tables/relationships/lineage/warnings 的完整嵌套 JSON Schema，根节点不接受 source、scope 等额外字段。`mode=replace` 为兼容的默认完整替换；Skills 优先使用 `mode=merge` 小批提交，每批最多 20 张表，建议 1–5 张，字段多时缩小。合并只按表名、关系端点/来源、血缘端点/表达式保存 DSH 已给出的条目，不生成任何语义结果；未涉及条目与关系 ID 保留，告警去重。引用校验在合并后执行，允许关系/血缘批次引用已有草稿对象。单任务 MCP 实例串行化保存操作，避免并行工具批次互相覆盖。
 
+MySQL 的原始表结构支持显式引用交付：`save_findings(findings={}, mode="merge", schema_refs=[{"evidence_id":"<证据ID>","names":["<表名>"]}])`。SchemaReference 为严格模型，引用必须来自当前任务 mysql_schema 证据且表确实存在；合计最多20张，与本批 findings.tables 不得重名。DSH 先审阅再选择引用，插件按固定 Table 字段复制 name/kind/comment/columns/keys，附上 DSH 指定证据引用，执行现有结构及范围校验。describe_tables 只保存证据，绝不自动接收结果；引用不生成外键关系、推断关系、置信度或血缘，所有关系和血缘必须由 DSH 明确提交。此契约是减少原始字段复述的结构存储方式，禁止扩展为 Python 自动分析器；兼容原完整 tables 提交方式。原始结构引用批次优先10–20张，完整对象输出仍建议1–5张。
+
+MySQL.describe 使用参数化 information_schema 查询：TABLES、COLUMNS、STATISTICS、KEY_COLUMN_USAGE（连接 REFERENTIAL_CONSTRAINTS）共4次 SELECT；包含视图时再读取 VIEWS，共5次。按 ORDINAL_POSITION、SEQ_IN_INDEX 保留复合键/外键次序、类型、默认值、注释及声明动作，禁止按名称猜测关系。名称仅用于绑定 IN 参数，表及 schema 范围始终限定。缺失对象/字段报错，函数索引暂不投影为普通列索引并返回告警，缺失视图定义告警。参考 [MySQL COLUMNS](https://dev.mysql.com/doc/refman/8.0/en/information-schema-columns-table.html)、[STATISTICS](https://dev.mysql.com/doc/refman/8.0/en/information-schema-statistics-table.html)、[KEY_COLUMN_USAGE](https://dev.mysql.com/doc/refman/8.0/en/information-schema-key-column-usage-table.html) 和 [SQLAlchemy 参数绑定](https://docs.sqlalchemy.org/en/20/core/sqlelement.html#sqlalchemy.sql.expression.bindparam)。查询次数不包含连接设置、事务命令和连接健康检查，不承诺数据库服务端扫描成本或固定端到端加速倍数。
+
+证据缓存仅在同一任务 execution_id 内生效。相同名称集合命中同一原始证据，refresh=true 强制采集；较新的重叠批次阻止复用旧批次。视图 SQL 定义从本轮原始证据复用，通过 get_sql_definition 明确请求后投影为 sql_definition 证据；较新结构缺少定义时不会回退旧 SQL。采集与定义缓存操作在单MCP实例串行化，避免刷新交错。日志明确标示缓存命中，不记录结构内容。新执行重读，不共享业务库缓存。Skill 指导 DSH 优先批量采集、引用提交和仅对具体候选验证，服务层不安排模型并行循环；Worker 仍同时执行一个任务。
+
 Worker 仅在 DSH 正常完成且存在本次执行发布的合法快照时，将分析任务标记为成功或部分成功。问答必须存在本次执行保存的合法答案。最终自然语言回答是摘要，不是元数据落库协议。
+
+结果界面使用并列Tabs隔离“关系与血缘”“表与字段”“分析说明（数量）”。说明页读取同一快照 findings.warnings 的完整列表，不受表名搜索过滤；没有说明时显示空状态。表格页仅包含搜索与表格，不在表格上方重复堆叠告警；该展示调整不修改DSH原始产物或审核数据。
 
 幂等键与任务范围绑定，重复工具调用不重复创建发现。重试建立新执行记录并读取已有草稿，不自动重复已完成的写入。工具错误交给 DSH 处理，不在上层创建模型输出修复循环。
 

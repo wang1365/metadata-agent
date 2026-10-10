@@ -78,6 +78,13 @@ class FindingsInput(StrictModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class SchemaReference(StrictModel):
+    """Explicit DSH selection of already-read raw table records, not inferred results."""
+
+    evidence_id: str
+    names: list[str] = Field(min_length=1, max_length=20)
+
+
 class Findings(FindingsInput):
     @model_validator(mode="after")
     def check_objects(self):

@@ -2,7 +2,7 @@ import time
 from contextlib import contextmanager
 
 import regex
-from sqlalchemy import URL, create_engine, inspect, text
+from sqlalchemy import URL, bindparam, create_engine, inspect, text
 
 
 def filter_objects(items, query="", match="fuzzy"):
@@ -76,57 +76,102 @@ class MySQL:
             ]
 
     def describe(self, names):
-        tables, foreign_keys, definitions, warnings = [], [], {}, []
+        """Read a selected batch with four catalog SELECTs plus one for views.
+
+        Grouping reflects declared database structures only; no relationship or
+        lineage conclusions are generated here.
+        """
+        if not 1 <= len(names) <= 20 or len(names) != len(set(names)):
+            raise ValueError("BATCH_LIMIT")
         with self.connection() as conn:
-            inspector = inspect(conn)
-            for name in names:
-                columns = [
-                    {
-                        "name": c["name"],
-                        "type": str(c["type"]),
-                        "nullable": c.get("nullable", True),
-                        "default": str(c["default"]) if c.get("default") is not None else None,
-                        "comment": c.get("comment") or "",
-                    }
-                    for c in inspector.get_columns(name)
-                ]
-                keys = []
-                pk = inspector.get_pk_constraint(name)
-                if pk.get("constrained_columns"):
-                    keys.append(
-                        {"kind": "primary", "columns": pk["constrained_columns"], "name": pk.get("name") or "PRIMARY"}
-                    )
-                for index in inspector.get_indexes(name):
-                    if index.get("column_names") and all(index["column_names"]):
-                        keys.append(
-                            {
-                                "kind": "unique" if index.get("unique") else "index",
-                                "columns": index["column_names"],
-                                "name": index["name"],
-                            }
-                        )
-                kind = "table"
-                try:
-                    definition = inspector.get_view_definition(name)
-                    if definition:
-                        kind = "view"
-                        definitions[name] = definition
-                except Exception:
-                    pass  # Physical tables do not have a view definition.
-                fks = inspector.get_foreign_keys(name) if kind == "table" else []
-                foreign_keys.extend({**fk, "table": name} for fk in fks)
-                for fk in fks:
-                    keys.append({"kind": "foreign", "columns": fk["constrained_columns"], "name": fk.get("name") or ""})
-                tables.append(
-                    {
-                        "name": name,
-                        "kind": kind,
-                        "comment": inspector.get_table_comment(name).get("text") or "",
-                        "columns": columns,
-                        "keys": keys,
-                    }
+
+            def read(sql):
+                statement = text(sql).bindparams(bindparam("names", expanding=True))
+                return conn.execute(statement, {"db": self.database, "names": names}).mappings().all()
+
+            objects = read(
+                "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_NAME IN :names ORDER BY TABLE_NAME"
+            )
+            if {row["TABLE_NAME"] for row in objects} != set(names):
+                raise ValueError("UNKNOWN_TABLE: selected objects unavailable")
+            columns = read(
+                "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=:db AND TABLE_NAME IN :names ORDER BY TABLE_NAME, ORDINAL_POSITION"
+            )
+            indexes = read(
+                "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=:db AND TABLE_NAME IN :names ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"
+            )
+            constraints = read(
+                "SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, r.UPDATE_RULE, r.DELETE_RULE FROM information_schema.KEY_COLUMN_USAGE k LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND r.TABLE_NAME=k.TABLE_NAME AND r.CONSTRAINT_NAME=k.CONSTRAINT_NAME WHERE k.TABLE_SCHEMA=:db AND k.TABLE_NAME IN :names AND k.REFERENCED_TABLE_NAME IS NOT NULL ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
+            )
+            views = (
+                read(
+                    "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA=:db AND TABLE_NAME IN :names ORDER BY TABLE_NAME"
                 )
-        return tables, foreign_keys, definitions, warnings
+                if any(row["TABLE_TYPE"] == "VIEW" for row in objects)
+                else []
+            )
+
+        tables = {
+            row["TABLE_NAME"]: {
+                "name": row["TABLE_NAME"],
+                "kind": "view" if row["TABLE_TYPE"] == "VIEW" else "table",
+                "comment": row["TABLE_COMMENT"] or "",
+                "columns": [],
+                "keys": [],
+            }
+            for row in objects
+        }
+        for row in columns:
+            tables[row["TABLE_NAME"]]["columns"].append(
+                {
+                    "name": row["COLUMN_NAME"],
+                    "type": row["COLUMN_TYPE"],
+                    "nullable": row["IS_NULLABLE"] == "YES",
+                    "default": str(row["COLUMN_DEFAULT"]) if row["COLUMN_DEFAULT"] is not None else None,
+                    "comment": row["COLUMN_COMMENT"] or "",
+                }
+            )
+        if any(not table["columns"] for table in tables.values()):
+            raise ValueError("SCHEMA_UNAVAILABLE: selected columns unavailable")
+        grouped_indexes = {}
+        for row in indexes:
+            grouped_indexes.setdefault((row["TABLE_NAME"], row["INDEX_NAME"]), []).append(row)
+        warnings = []
+        for (name, index), rows in grouped_indexes.items():
+            if any(row["COLUMN_NAME"] is None for row in rows):
+                warnings.append(f"FUNCTIONAL_INDEX_UNSUPPORTED:{name}:{index}")
+                continue
+            tables[name]["keys"].append(
+                {
+                    "name": index,
+                    "kind": "primary" if index == "PRIMARY" else "unique" if not rows[0]["NON_UNIQUE"] else "index",
+                    "columns": [row["COLUMN_NAME"] for row in rows],
+                }
+            )
+        grouped_fks = {}
+        for row in constraints:
+            grouped_fks.setdefault((row["TABLE_NAME"], row["CONSTRAINT_NAME"]), []).append(row)
+        foreign_keys = []
+        for (name, constraint), rows in grouped_fks.items():
+            first = rows[0]
+            fk = {
+                "table": name,
+                "name": constraint,
+                "constrained_columns": [row["COLUMN_NAME"] for row in rows],
+                "referred_schema": first["REFERENCED_TABLE_SCHEMA"],
+                "referred_table": first["REFERENCED_TABLE_NAME"],
+                "referred_columns": [row["REFERENCED_COLUMN_NAME"] for row in rows],
+                "options": {"onupdate": first["UPDATE_RULE"], "ondelete": first["DELETE_RULE"]},
+            }
+            foreign_keys.append(fk)
+            tables[name]["keys"].append({"kind": "foreign", "columns": fk["constrained_columns"], "name": constraint})
+        definitions = {row["TABLE_NAME"]: row["VIEW_DEFINITION"] for row in views if row["VIEW_DEFINITION"]}
+        warnings.extend(
+            f"DEFINITION_UNAVAILABLE:{name}"
+            for name, table in tables.items()
+            if table["kind"] == "view" and name not in definitions
+        )
+        return [tables[name] for name in names], foreign_keys, definitions, warnings
 
     def definition(self, name, kind):
         with self.connection() as conn:
