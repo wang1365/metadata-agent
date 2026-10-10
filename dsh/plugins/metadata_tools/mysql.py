@@ -1,6 +1,32 @@
+import time
 from contextlib import contextmanager
 
+import regex
 from sqlalchemy import URL, create_engine, inspect, text
+
+
+def filter_objects(items, query="", match="fuzzy"):
+    """Filter raw object names only; never interprets metadata or expands scope."""
+    if match not in ("fuzzy", "regex") or len(query) > 256:
+        raise ValueError("INVALID_OBJECT_FILTER")
+    if match == "fuzzy":
+        return [item for item in items if query.casefold() in item["name"].casefold()]
+    try:
+        pattern = regex.compile(query, regex.IGNORECASE)
+    except regex.error:
+        raise ValueError("INVALID_REGEX") from None
+    deadline = time.monotonic() + 0.2
+    selected = []
+    for item in items:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("REGEX_TIMEOUT")
+        try:
+            if pattern.search(item["name"], timeout=remaining):
+                selected.append(item)
+        except TimeoutError:
+            raise ValueError("REGEX_TIMEOUT") from None
+    return selected
 
 
 class MySQL:

@@ -47,12 +47,11 @@ class Capabilities:
         return MySQL(config)
 
     def allowed_tables(self, database):
-        objects = database.objects()
-        selected = self.job().get("tables") or [obj["name"] for obj in objects]
+        selected = self.job().get("tables")
+        if not selected:  # Compatibility for previously queued whole-database tasks.
+            selected = [obj["name"] for obj in database.objects()]
         if len(selected) > 500:
             raise ValueError("TABLE_LIMIT_EXCEEDED")
-        if not set(selected) <= {obj["name"] for obj in objects}:
-            raise ValueError("UNKNOWN_TABLE")
         return selected
 
     def inspect_workbook(self) -> dict:
@@ -159,6 +158,8 @@ class Capabilities:
         """Read view, routine or trigger definition inside the task's selected database."""
         database = self.mysql()
         try:
+            if kind != "view" and self.job().get("tables"):
+                raise ValueError("DEFINITION_OUTSIDE_TASK: selected-table tasks only read selected view definitions")
             if kind == "view" and name not in self.allowed_tables(database):
                 raise ValueError("TABLE_OUTSIDE_TASK")
             sql = database.definition(name, kind)
@@ -195,6 +196,9 @@ class Capabilities:
         }
 
     def check_columns(self, table, columns):
+        selected = self.job().get("tables")
+        if selected and table not in selected:
+            raise ValueError("TABLE_OUTSIDE_TASK")
         tables = {t["name"]: t for t in self.job()["draft"]["tables"]}
         if table not in tables or not columns or not set(columns) <= {c["name"] for c in tables[table]["columns"]}:
             raise ValueError("UNKNOWN_COLUMN")
@@ -313,6 +317,9 @@ class Capabilities:
         job = self.job()
         self.source()
         parsed = Findings.model_validate(self.merge_input(findings, mode))
+        if self.source()["type"] == "mysql" and job.get("tables"):
+            if not {table.name for table in parsed.tables} <= set(job["tables"]):
+                raise ValueError("TABLE_OUTSIDE_TASK")
         original = Findings.model_validate(job["draft"])
         if job["confirmed"] and parsed.tables != original.tables:
             raise ValueError("CONFIRMED_MAPPING_IMMUTABLE")

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from dsh.plugins.metadata_tools.excel import inspect_workbook
-from dsh.plugins.metadata_tools.mysql import MySQL
+from dsh.plugins.metadata_tools.mysql import MySQL, filter_objects
 
 from .config import ROOT, get_settings
 from .models import AnalysisRequest, MappingRequest, MySQLSource, QuestionRequest, ReviewRequest
@@ -133,16 +133,20 @@ def create_app(settings=None):
             db.close()
 
     @app.get(prefix + "/sources/{source_id}/objects")
-    def objects(source_id: str, offset: int = 0, limit: int = 100):
+    def objects(source_id: str, offset: int = 0, limit: int = 100, query: str = "", match: str = "fuzzy"):
         if offset < 0 or not 1 <= limit <= 500:
             raise ValueError("INVALID_PAGINATION")
         source = store.get(source_id, "source")
         if source["type"] == "excel":
             return {"objects": source["sheets"]}
+        filter_objects([], query, match)  # Validate before opening the database connection.
         db = database(source_id)
         try:
-            items = db.objects()
-            return {"objects": items[offset : offset + limit], "total": len(items)}
+            items = sorted(db.objects(), key=lambda item: item["name"])
+            filtered = filter_objects(items, query, match)
+            return {"objects": filtered[offset : offset + limit], "total": len(filtered), "source_total": len(items)}
+        except ValueError:
+            raise
         except Exception:
             raise HTTPException(400, "MYSQL_OBJECT_LIST_FAILED") from None
         finally:
@@ -150,6 +154,23 @@ def create_app(settings=None):
 
     @app.post(prefix + "/analyses", status_code=202)
     def start_analysis(body: AnalysisRequest):
+        source = store.get(body.source_id, "source")
+        if source["type"] == "mysql":
+            if not body.tables:
+                raise ValueError("TABLE_SELECTION_REQUIRED")
+            if len(set(body.tables)) != len(body.tables):
+                raise ValueError("DUPLICATE_TABLE_SELECTION")
+            db = database(body.source_id)
+            try:
+                available = {item["name"] for item in db.objects()}
+            except Exception:
+                raise HTTPException(400, "MYSQL_OBJECT_LIST_FAILED") from None
+            finally:
+                db.close()
+            if not set(body.tables) <= available:
+                raise ValueError("UNKNOWN_TABLE_SELECTION: refresh objects and select again")
+        elif body.tables:
+            raise ValueError("TABLE_SELECTION_MYSQL_ONLY")
         job_id = store.new_job(**body.model_dump())
         store.log(job_id, "task.queued", "任务已入队，等待 Worker")
         return {"task_id": job_id}

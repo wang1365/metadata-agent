@@ -12,6 +12,8 @@
 
 全部分析由 DSH 执行。Python 提供接口与任务管理；MCP 工具由 `dsh/plugins/metadata_tools/` 插件实现和加载，分析方法使用 `dsh/skills/` 原生 Skills。
 
+MySQL 数据源点击“创建分析”后，可按表名片段（模糊匹配，如 `order`）或正则（如 `^(sys_|biz_)`）筛选，再勾选表/视图。支持分页、勾选全部匹配项、跨条件保留选择和移除已选项；每次必须显式选择 1–500 张。列表可浏览超过 500 张表的数据库，筛选后显示匹配数、全库数及已选数。DSH 仅处理选中范围，范围外关联/血缘引用记录告警，不自动扩大任务。REST 调用 `POST /api/v1/analyses` 也须传非空 `tables`，如 `["example_table"]`；Excel 不需要此参数。
+
 开发调试（Linux/macOS Bash、Windows Git Bash；WSL 需要在 WSL 内安装依赖）：
 
 ```bash

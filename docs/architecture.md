@@ -110,7 +110,7 @@ Worker 不决定下一步调用哪个工具，不根据模型文本编写工具�
 | Excel `inspect_workbook` | 已绑定文件，可选 Sheet 范围 | Sheet、尺寸、合并单元格；表块识别由 DSH 完成，不返回整个工作簿 |
 | Excel `read_region` | Sheet、单元格范围、分页 | 原始值、坐标及布局信息；限制区域大小 |
 | Excel `save_dictionary_draft` | 表、字段、键、来源范围 | 通过校验的草稿版本、告警；确认后的内容不能被自动覆盖 |
-| MySQL `list_objects` | 已选范围、分页 | 数据库、表和视图标识 |
+| MySQL `list_objects` | 无输入，范围由任务绑定 | 当前任务所选表和视图标识，不向模型返回范围外目录 |
 | MySQL `describe_tables` | 范围内表 ID 列表 | 字段、键、索引、注释等结构证据 |
 | MySQL `get_sql_definition` | 对象 ID、类型 | SQL 定义及可见性告警 |
 | MySQL `profile_columns` | 对象字段、指标类型 | 有界查询的空值、唯一性等指标及范围 |
@@ -173,6 +173,12 @@ SQLite 使用短事务和有限锁等待，模型调用与数据库采样期间�
 
 配置与连接测试 → 选定范围 → 排队 → DSH 采集结构及定义 → 自主选择候选与受控验证 → DSH 按 Skill 分析 SQL 血缘 → 保存发现 → 发布快照。
 
+前置选表由 React TablePicker 调用目录 REST API，插件 MySQL 适配器只读取原始表/视图名并过滤，不调用模型、不推断。模糊模式为 casefold 包含匹配；正则使用 regex.search/IGNORECASE，整个候选集共享 200 毫秒匹配预算，语法错误/超时返回 INVALID_REGEX/REGEX_TIMEOUT。超时能力参见 [regex 官方说明](https://pypi.org/project/regex/#timeout)。数据库连接/读取另受现有 10/30 秒超时约束。接口每次读取名称目录后在适配器中过滤、排序及分页，尚未引入目录缓存；分页不采集字段或样本，不意味着数据库端名称扫描成本为零。
+
+界面每页50项，React Query 按数据源/条件/页缓存请求，选择值使用独立 names 列表并跨页保留，支持批量追加匹配项（最多500）及移除。POST /analyses 对 MySQL 强制要求非空唯一 tables（最多500），用当前名称目录验证后将具体名称持久化到任务，不存可再次扩展的正则条件。空列表返回 TABLE_SELECTION_REQUIRED；名称过期返回 UNKNOWN_TABLE_SELECTION。retry 复制原 tables。旧版本已排队/历史空范围任务保持旧语义，不在升级时静默迁移。
+
+显式选表任务按持久化范围校验 describe_tables、样本/聚合/关系验证和 save_findings；每批结构采集不再扫描全库目录。list_objects 仅返回选中对象；get_sql_definition 只允许选中视图，拒绝例程/触发器定义。范围外引用保留原始结构证据，由 DSH 写 warnings，不自动补读或发布未知端点。此限制只控制访问和结构契约，分析仍全部由 DSH 完成。创建后对象被删除时由原有工具错误机制报告，不自动替换范围。
+
 Excel 和 MySQL 结果不会自动合并。数据定义不可见或验证失败时，由结果覆盖范围和告警说明缺失，允许合法的部分成功。
 
 ### 6.3 问答
@@ -210,7 +216,7 @@ stateDiagram-v2
 | `POST /sources/excel` | multipart 上传，返回 Source ID |
 | `POST /sources/mysql` | 保存连接参数与加密凭据，返回脱敏的数据源信息 |
 | `POST /sources/{id}/test` | 确定性连接测试，返回版本、可达性和权限告警 |
-| `GET /sources/{id}/objects` | 分页列出可选数据库/表；Excel 的已识别对象由草稿接口提供 |
+| `GET /sources/{id}/objects` | MySQL 表/视图名筛选：query（最多256字符）、match=fuzzy/regex、offset、limit（1–500，默认100）；先排序过滤再分页，返回 objects、过滤后 total、全库 source_total；Excel 的已识别对象由草稿接口提供 |
 | `POST /analyses` | 接收 Source ID、范围和分析选项，返回任务 ID |
 | `GET /analyses/{id}` | 状态、阶段、预算、告警及快照引用 |
 | `GET /analyses/{id}/logs` | `after` 游标（默认 0）、`limit`（默认 200，最多 500）；返回事件、next_cursor、has_more、truncated、任务状态 |
