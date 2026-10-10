@@ -1,15 +1,18 @@
 """API documentation metadata and local UI assets; no analysis or task execution."""
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
-from swagger_ui_bundle import swagger_ui_path
 
 from .models import Findings, LineageEdge, Relationship, Table
 
 PREFIX = "/api/v1"
+SWAGGER_UI_VERSION = "5.33.1"
+SWAGGER_UI_ASSETS = Path(__file__).parent / "static" / "swagger-ui" / SWAGGER_UI_VERSION
 INTRODUCTION = """
 面向上层系统的元数据 REST API。DSH 负责全部分析；本服务负责接口、异步任务及结果查询。
 
@@ -420,19 +423,22 @@ def operation(name: str, status: int = 200):
 
 
 def install_docs(app: FastAPI):
-    app.mount(PREFIX + "/docs/assets", StaticFiles(directory=swagger_ui_path), name="swagger-assets")
+    asset_url = PREFIX + "/docs/assets/" + SWAGGER_UI_VERSION
+    app.mount(asset_url, StaticFiles(directory=SWAGGER_UI_ASSETS), name="swagger-assets")
 
     @app.get(PREFIX + "/docs", include_in_schema=False)
     def docs(request: Request):
         root = request.scope.get("root_path", "").rstrip("/")
-        return get_swagger_ui_html(
+        page = get_swagger_ui_html(
             openapi_url=root + app.openapi_url,
             title="Metadata Service · API文档",
-            swagger_js_url=root + PREFIX + "/docs/assets/swagger-ui-bundle.js",
-            swagger_css_url=root + PREFIX + "/docs/assets/swagger-ui.css",
-            swagger_favicon_url=root + PREFIX + "/docs/assets/favicon-32x32.png",
+            swagger_js_url=root + asset_url + "/swagger-ui-bundle.js",
+            swagger_css_url=root + asset_url + "/swagger-ui.css",
+            swagger_favicon_url=root + asset_url + "/favicon-32x32.png",
             swagger_ui_parameters={"filter": True, "displayRequestDuration": True, "validatorUrl": None},
         )
+        page.headers["Cache-Control"] = "no-store"
+        return page
 
     @app.get("/docs", include_in_schema=False)
     @app.get("/redoc", include_in_schema=False)

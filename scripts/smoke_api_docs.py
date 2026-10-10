@@ -9,6 +9,7 @@ import sys
 import time
 from urllib.request import urlopen
 
+from metadata_service.api_docs import SWAGGER_UI_VERSION
 from metadata_service.config import ROOT
 from metadata_service.store import uid
 from metadata_service.worker import stop_tree
@@ -74,7 +75,7 @@ def main():
                 with urlopen(base + path, timeout=5) as response:
                     assert "/api/v1/analyses" in json.load(response)["paths"]
             for name in ("swagger-ui-bundle.js", "swagger-ui.css", "favicon-32x32.png"):
-                with urlopen(base + "/api/v1/docs/assets/" + name, timeout=5) as response:
+                with urlopen(base + "/api/v1/docs/assets/" + SWAGGER_UI_VERSION + "/" + name, timeout=5) as response:
                     assert response.status == 200 and response.read()
             print("API_DOCS_PROXY_OK canonical=200 legacy=200 schema=200 assets=200 custom_ports=true", flush=True)
         finally:

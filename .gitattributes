@@ -1,1 +1,4 @@
 *.sh text eol=lf
+
+# Preserve official asset bytes, including upstream formatting, across Windows checkouts.
+/metadata_service/static/swagger-ui/*/* -text -whitespace

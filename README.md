@@ -116,4 +116,6 @@ Copy-Item dsh-home-1/.env.example dsh-home-1/.env
 
 运行 `cd frontend` 后执行 `npm run test:force` 可验证布局、合并、浮动边界及Worker。用于人工大图验收的隔离合成服务：仓库根目录运行 `python -m scripts.preview_force_graph --port 18766`（先执行前端构建），访问 `http://127.0.0.1:18766`；包含500表/5000关系，数据位于忽略的data目录，不运行DSH、不连接业务数据库。当前浏览器验收限制见[实施记录](docs/implementation.md)。
 
-API文档支持直接访问后端或通过前端 `/api/v1/docs` 同源代理；左下角另有 `/api/v1/openapi.json` 供导入Postman/生成客户端。Swagger静态资源随Python依赖本地提供，无需CDN；旧 `/docs`、`/redoc`、`/openapi.json` 保留跳转。当前是无API鉴权的本地单用户服务，接入说明见 [docs/api.md](docs/api.md)。
+API文档支持直接访问后端或通过前端 `/api/v1/docs` 同源代理；左下角另有 `/api/v1/openapi.json` 供导入Postman/生成客户端。Swagger UI 5.33.1官方静态资源随仓库本地提供，兼容OpenAPI 3.1，无需CDN或前端构建；旧 `/docs`、`/redoc`、`/openapi.json` 保留跳转。当前是无API鉴权的本地单用户服务，接入说明见 [docs/api.md](docs/api.md)。
+
+文档渲染回归：在frontend目录运行 `npm run test:api-docs`，将真实OpenAPI 3.1交给本地Swagger UI并断言全部接口显示；仅HTTP返回200不能证明渲染正常。旧版本页面出现版本提示时，重启开发服务后按Ctrl+F5刷新。

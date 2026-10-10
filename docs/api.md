@@ -10,7 +10,7 @@
 | OpenAPI 3.1 JSON，可导入Postman/生成客户端 | `/api/v1/openapi.json` |
 | 兼容旧入口 | `/docs`、`/redoc`跳转Swagger；`/openapi.json`跳转新JSON地址 |
 
-开发模式访问 `http://127.0.0.1:5173/api/v1/docs`，Vite代理文档、规范及静态资源到API端口；直接访问后端则为 `http://127.0.0.1:8000/api/v1/docs`。自定义端口遵循 `METADATA_API_PORT` / `METADATA_UI_PORT`。单机服务模式前后端同源。Swagger静态资源随Python依赖安装，本地提供，不依赖CDN或前端构建；没有Worker/模型连接也能打开文档。
+开发模式访问 `http://127.0.0.1:5173/api/v1/docs`，Vite代理文档、规范及静态资源到API端口；直接访问后端则为 `http://127.0.0.1:8000/api/v1/docs`。自定义端口遵循 `METADATA_API_PORT` / `METADATA_UI_PORT`。单机服务模式前后端同源。Swagger UI 5.33.1官方资源位于仓库metadata_service/static/swagger-ui，以带版本路径本地提供，兼容OpenAPI 3.1，不依赖CDN、npm安装或前端构建；没有Worker/模型连接也能打开文档。
 
 当前服务是本地单用户版本，**没有API Key/OAuth鉴权或租户隔离**，默认监听127.0.0.1。接入其他服务时使用受控网络和网关。未默认开启CORS；浏览器客户端优先同源反向代理，服务间HTTP调用不受浏览器CORS约束。
 
@@ -188,3 +188,5 @@ JSON导出完整快照（findings/evidence/reviews等），CSV为表字段、UTF
 ## 验证
 
 `python -m pytest tests/test_api_docs.py -q`覆盖文档、离线静态资源、旧链接、反向代理root_path、29项操作Schema及422脱敏。先安装前端依赖后，`python -m scripts.smoke_api_docs`启动隔离API与Vite，以随机自定义端口通过真实HTTP验证侧栏目标、旧地址、OpenAPI及本地资源，然后回收进程；不运行DSH、不连接业务库。该检查验证HTTP链路，不声称完成浏览器视觉验收。
+
+Swagger渲染验证：在frontend执行 `npm run test:api-docs`，使用真实FastAPI Schema和生产静态bundle，在jsdom隔离DOM内断言29项操作可见、识别为OpenAPI 3.1且没有版本错误；这是渲染兼容性回归，不等同于原生浏览器视觉/Try it out验收。资源来源/完整性/许可见[资源说明](../metadata_service/static/swagger-ui/README.md)。文档HTML不缓存，资源URL带版本；升级后如仍显示旧错误，重启API并Ctrl+F5刷新。不要只将openapi版本字段改成3.0，Schema仍包含3.1语义。

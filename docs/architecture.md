@@ -226,7 +226,7 @@ stateDiagram-v2
 
 文档规范入口统一为 `/api/v1/docs` 和 `/api/v1/openapi.json`，`/docs`及`/redoc`重定向Swagger、`/openapi.json`重定向规范。`api_docs.py`集中声明29项当前业务操作的标签、中文摘要/描述、请求示例、主要响应Schema及错误结构，通过FastAPI原生OpenAPI生成；响应文档模型不改变现有业务响应或执行额外结果校验。请求模型仍执行既有输入校验，422按实际loc/type/msg记录，不暴露输入。`docs/api.md`为接入流程与curl参考，不能用其替代实际OpenAPI字段。
 
-采用FastAPI官方自托管文档方式，Python锁定`swagger-ui-bundle==1.1.0`，只提供其静态资源；`/api/v1/docs/assets`、规范和UI均由同一API服务提供，不依赖CDN、前端构建或DSH连接。静态挂载在前端根挂载之前，反向代理root_path用于文档资源URL。Vite将/api及兼容/docs、/redoc、/openapi.json转发到METADATA_API_PORT；侧栏链接使用/api/v1/docs并另提供OpenAPI JSON，避免/docs被SPA fallback吞掉。默认同源，不新增CORS、鉴权或分析逻辑。选型参考[FastAPI自托管文档](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/)。
+采用FastAPI官方自托管文档方式，使用官方`swagger-ui-dist@5.33.1`发布包的固定静态资源，随仓库置于`metadata_service/static/swagger-ui/5.33.1`；`/api/v1/docs/assets/5.33.1`、规范和UI均由同一API服务提供，不依赖CDN、前端构建或DSH连接。静态挂载在前端根挂载之前，反向代理root_path用于文档资源URL。Vite将/api及兼容/docs、/redoc、/openapi.json转发到METADATA_API_PORT；侧栏链接使用/api/v1/docs并另提供OpenAPI JSON，避免/docs被SPA fallback吞掉。默认同源，不新增CORS、鉴权或分析逻辑。选型参考[FastAPI自托管文档](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/)。
 
 | 方法与路径 | 主要行为 |
 | --- | --- |
@@ -277,6 +277,11 @@ stateDiagram-v2
 `ForceMemory` 在当前快照页面会话内保存布局坐标、固定集合和布局完成状态，切Tab可复用，筛选/审核/全屏不重新计算已有布局；刷新或切换快照不持久化。拖动或键盘移动写入固定坐标，解除固定后可重新布局。全屏以实体图容器为宿主，保留筛选和工具栏，弹层挂载到当前全屏元素，Esc由浏览器退出。PNG使用Cytoscape blob-promise导出当前视口或全部已加载图，最大4096×4096，释放下载URL；力导图不增加SVG，JSON仍由既有快照导出提供。接口截断告警同时适用于“完整图”PNG。
 
 选型参考 [Cytoscape.js](https://js.cytoscape.org/) 和 [D3静态布局/Worker](https://d3js.org/d3-force/simulation)。布局计算属于展示几何，全部语义分析仍由DSH负责；没有新增运行时插件或Skills分析步骤。
+
+### 7.2 API文档渲染兼容性
+FastAPI保留OpenAPI 3.1，不将版本字段伪降为3.0。移除Python swagger-ui-bundle（1.1.0实际携带UI 4.15.5，不支持此Schema），替换为官方UI 5.33.1：发布包integrity与npm官方元数据核对，版本目录manifest记录原文件SHA-256，保留LICENSE/NOTICE及bundle依赖许可。文档HTML设置Cache-Control:no-store，资源路径包含版本。API文档运行不依赖Node/npm；jsdom仅为开发测试依赖。
+
+除HTTP/代理/Schema测试外，frontend/scripts/test-api-docs.mjs加载真实FastAPI Schema和实际生产bundle，在隔离DOM内断言全部29项操作、OpenAPI 3.1识别及无版本提示，且禁止网络。旧4.15.5在同一测试中复现错误，新5.33.1通过。这补足先前HTTP检查未覆盖UI兼容性的缺口，不等于原生浏览器布局和Try it out交互验收。官方兼容范围见[Swagger UI版本表](https://github.com/swagger-api/swagger-ui#compatibility)，更新说明见[静态资源](../metadata_service/static/swagger-ui/README.md)。DSH及Skills分析契约不变。
 
 ## 8. 隔离、配置与单机部署
 

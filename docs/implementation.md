@@ -107,3 +107,14 @@ Cytoscape按需加载，d3-force在独立Worker内计算几何，300轮/5秒限�
 新增api_docs.py，使用FastAPI原生文档和Swagger UI静态资源，锁定Python swagger-ui-bundle依赖及uv.lock；脚本/CSS/图标同源本地提供，无需CDN或前端构建。29项业务操作补充中文分组、用途、主要响应Schema、错误、占位符请求示例；密码Schema标记writeOnly，422与实际脱敏结构一致。响应文档模型只描述协议，不改写既有业务响应。docs/api.md记录已实现的Excel/MySQL、异步状态、确认/取消/重试、日志游标、图/证据/审核、问答会话和导出，明确当前无API鉴权、非默认跨域、CSV只导出表字段和未实现接口。需求、架构和README同步，DSH/MCP/Skills分析契约无需变更。
 
 验证：38项后端测试通过。新增3项文档回归覆盖同源静态资源、旧链接、root_path、全部操作Schema、上传multipart及422输入不回显。`python -m scripts.smoke_api_docs`以隔离data目录和随机自定义端口启动真实API/Vite，文档、新旧规范及JS/CSS/图标经前端HTTP代理返回200，未落到SPA页面，随后回收测试进程；未运行DSH或连接业务库。Ruff、前端TypeScript及生产构建通过。此次验证覆盖文档HTTP链路及Schema，未宣称完成Swagger页面的浏览器视觉或Try it out交互验收。
+
+
+## Swagger UI与OpenAPI 3.1兼容性修复
+
+用户截图显示文档UI已加载，但报“Unable to render this definition”。检查安装包确认swagger-ui-bundle==1.1.0实际上携带Swagger UI 4.15.5，而FastAPI生成OpenAPI 3.1；此前只验证HTML/Schema/资源HTTP 200，遗漏渲染器版本兼容性。该HTTP验证不足以证明可用，已补上执行实际UI bundle的回归。
+
+移除旧Python静态包与其额外依赖，使用官方npm registry的swagger-ui-dist@5.33.1固定发布资源，保存在metadata_service/static/swagger-ui/5.33.1。核对官方tarball integrity，manifest记录原文件SHA-256，保留LICENSE/NOTICE和bundle依赖许可。资源URL带版本，HTML no-store；运行API无需Node/npm或外部CDN。OpenAPI仍为3.1，不伪降版本。需求、架构、API指南和README同步；DSH/MCP/Skills契约不变。
+
+frontend/scripts/test-api-docs.mjs以实际FastAPI Schema加载实际生产bundle，在隔离jsdom中禁止网络，断言29项操作全部显示、OpenAPI 3.1识别及无版本提示。使用原4.15.5运行同一测试复现截图错误并按预期失败；5.33.1通过。此验证覆盖实际渲染逻辑，不等同于Windows原生浏览器视觉或Try it out验收。
+
+验证：39项后端测试通过，新增资源版本和SHA-256校验、HTML缓存头；真实API/Vite新旧文档、规范和带版本资源HTTP检查通过；渲染回归、Ruff、前端TypeScript和生产构建通过。临时进程已回收，测试数据在忽略目录。升级后重启API并Ctrl+F5刷新文档，以加载新版资源。
