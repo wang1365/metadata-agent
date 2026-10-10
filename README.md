@@ -7,6 +7,7 @@
 
 - [开发与运行公约](agent.md)：DSH 分析边界、插件与 Skills 优先、代码和设计文档同步提交。
 - [实施记录](docs/implementation.md)：已实现能力、验证范围和待办。
+- [API接入指南](docs/api.md)：接口入口、Excel/MySQL接入、任务轮询、问答、查询、错误与curl示例。
 
 ## 元数据服务（本机测试版）
 
@@ -16,7 +17,7 @@ Git 排除本地 `.env`、主密钥、依赖与构建缓存、日志、SQLite �
 
 MySQL 数据源点击“创建分析”后，可按表名片段（模糊匹配，如 `order`）或正则（如 `^(sys_|biz_)`）筛选，再勾选表/视图。支持分页、勾选全部匹配项、跨条件保留选择和移除已选项；每次必须显式选择 1–500 张。列表可浏览超过 500 张表的数据库，筛选后显示匹配数、全库数及已选数。DSH 仅处理选中范围，范围外关联/血缘引用记录告警，不自动扩大任务。REST 调用 `POST /api/v1/analyses` 也须传非空 `tables`，如 `["example_table"]`；Excel 不需要此参数。
 
-数据源列表点击“查看详情”可浏览连接信息、MySQL 表/视图字段与声明索引、Excel Sheet 和指定单元格区域。MySQL 样例需要显式选择字段并点击读取，每次最多20行、20列、每值200字符；只读首批行，不保存到分析快照、不发送给模型。Excel 每次最多预览2000单元格。
+数据源列表点击“查看详情”可浏览连接信息、MySQL 表/视图字段与声明索引、Excel Sheet 和指定单元格区域。MySQL 结构与样例在弹窗中展示，样例默认选中全部字段、可删减，点击后才读取；每次最多20行、每值200字符（接口最多4096列）；只读首批行，不保存到分析快照、不发送给模型。Excel 使用原工作表网格预览，保留行列、空白、合并区域、尺寸和常见样式，每次最多2000单元格；不执行公式，图片、图表、条件格式及复杂数字格式暂不完整还原。
 
 分析任务与问答任务在独立标签页展示，并由独立 Worker 队列执行。并发数在根目录 `.env` 中设置，默认各1，范围各1–8，重启后生效：
 
@@ -36,7 +37,7 @@ METADATA_QA_CONCURRENCY=2
 bash ./start-dev.sh
 ```
 
-脚本同步 Python 依赖，缺少前端依赖时执行 `npm ci`，同时启动 API、分析 Worker、问答 Worker 与 Vite。打开 `http://127.0.0.1:5173`，REST 文档为 `http://127.0.0.1:8000/docs`。前端支持热更新，API 支持自动重载；插件、Skills 和 Worker 代码修改后重启脚本。按 `Ctrl+C` 关闭进程树。
+脚本同步 Python 依赖，缺少前端依赖时执行 `npm ci`，同时启动 API、分析 Worker、问答 Worker 与 Vite。打开 `http://127.0.0.1:5173`，REST 文档为 `http://127.0.0.1:8000/api/v1/docs`。前端支持热更新，API 支持自动重载；插件、Skills 和 Worker 代码修改后重启脚本。按 `Ctrl+C` 关闭进程树。
 
 端口可在 `.env` 中设置 `METADATA_API_PORT` / `METADATA_UI_PORT`，或在启动环境覆盖。日志位于数据目录的 `dev-logs/`，便于查看 DSH 任务错误。下列命令使用默认本地数据目录：
 
@@ -66,7 +67,7 @@ cd ..
 ./start-service.ps1
 ```
 
-打开 `http://127.0.0.1:8000`，REST 文档为 `/docs`。API 与 Worker 也可分别启动：
+打开 `http://127.0.0.1:8000`，REST 文档为 `/api/v1/docs`。API 与 Worker 也可分别启动：
 
 ```powershell
 uv run uvicorn metadata_service.api:create_app --factory --host 127.0.0.1 --port 8000
@@ -106,3 +107,13 @@ Copy-Item dsh-home-1/.env.example dsh-home-1/.env
 `sdk-minimal` 下的补丁不会应用到 `sdk`。自定义插件的日志应写入 stderr（例如 `console.error`），stdout 由 SDK 的 JSON-RPC 协议独占。
 
 `sdk` 补丁保留 `compression: none`，兼容当前 home 中原有的未压缩 JSONL 会话；默认 zstd 编码不能与这些会话混用。
+
+界面右侧内容独立滚动，左侧导航和顶部栏保持可见。ER/血缘图默认展示当前快照全部表（含孤立表），选择中心表查看一跳关系，清除选择恢复全图。连线最多200条，超出时显示数量与告警；节点支持自动适配视口、缩放与小地图导航。
+
+“ER关联图”和“加工血缘图”使用独立Tab切换；图右上角可进入全屏，按Esc或“退出全屏”返回。
+
+新增“实体关系力导图”Tab，表为圆形、视图为菱形，包含孤立对象，仅使用已保存的声明/推断关联。最多加载5000条原始关系，支持搜索、来源/置信度/审核筛选、中心表一跳、关系合并展示及逐条审核。单击节点高亮邻居，双击节点打开字段详情抽屉；列表和详情按钮也可操作。默认轻微浮动，可暂停；已固定、选中和悬停节点保持静止，系统减少动态效果时默认关闭。支持拖动固定、解除固定、重新布局、缩放、全屏及当前/完整已加载图PNG（最大4096像素）；JSON导出沿用原接口。力布局只改变位置，不进行业务实体识别或新增关系。
+
+运行 `cd frontend` 后执行 `npm run test:force` 可验证布局、合并、浮动边界及Worker。用于人工大图验收的隔离合成服务：仓库根目录运行 `python -m scripts.preview_force_graph --port 18766`（先执行前端构建），访问 `http://127.0.0.1:18766`；包含500表/5000关系，数据位于忽略的data目录，不运行DSH、不连接业务数据库。当前浏览器验收限制见[实施记录](docs/implementation.md)。
+
+API文档支持直接访问后端或通过前端 `/api/v1/docs` 同源代理；左下角另有 `/api/v1/openapi.json` 供导入Postman/生成客户端。Swagger静态资源随Python依赖本地提供，无需CDN；旧 `/docs`、`/redoc`、`/openapi.json` 保留跳转。当前是无API鉴权的本地单用户服务，接入说明见 [docs/api.md](docs/api.md)。

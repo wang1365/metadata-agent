@@ -3,14 +3,15 @@ import io
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from dsh.plugins.metadata_tools.excel import inspect_workbook, read_region
+from dsh.plugins.metadata_tools.excel import inspect_workbook, preview_region, read_region
 from dsh.plugins.metadata_tools.mysql import MySQL, filter_objects
 
+from .api_docs import INTRODUCTION, PREFIX, TAGS, install_docs, operation
 from .config import ROOT, get_settings
 from .models import AnalysisRequest, MappingRequest, MySQLSource, QuestionRequest, ReviewRequest, SamplePreviewRequest
 from .store import TERMINAL, Store, job_queue, now, uid
@@ -26,10 +27,15 @@ def create_app(settings=None):
     app = FastAPI(
         title="Metadata Service",
         version="0.1.0",
-        description="DSH-powered metadata analysis. Local single-user preview.",
+        description=INTRODUCTION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=PREFIX + "/openapi.json",
+        openapi_tags=TAGS,
     )
     app.state.store = store
-    prefix = "/api/v1"
+    prefix = PREFIX
+    install_docs(app)
 
     @app.exception_handler(KeyError)
     def missing(_request, _exc):
@@ -54,7 +60,7 @@ def create_app(settings=None):
             },
         )
 
-    @app.get(prefix + "/health")
+    @app.get(prefix + "/health", **operation("health"))
     def health():
         return {
             "status": "ok",
@@ -65,11 +71,11 @@ def create_app(settings=None):
             "display_timezone": "Asia/Shanghai",
         }
 
-    @app.get(prefix + "/sources")
+    @app.get(prefix + "/sources", **operation("sources"))
     def sources():
         return [public_source(source) for source in store.list("source")]
 
-    @app.post(prefix + "/sources/excel", status_code=201)
+    @app.post(prefix + "/sources/excel", status_code=201, **operation("upload", 201))
     def upload(file: UploadFile):
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in (".xlsx", ".xls"):
@@ -107,7 +113,7 @@ def create_app(settings=None):
         )
         return public_source(store.get(source_id, "source"))
 
-    @app.post(prefix + "/sources/mysql", status_code=201)
+    @app.post(prefix + "/sources/mysql", status_code=201, **operation("mysql_source", 201))
     def mysql_source(body: MySQLSource):
         config = body.model_dump(exclude={"password", "name"})
         source_id = store.create(
@@ -129,7 +135,7 @@ def create_app(settings=None):
         config["password"] = settings.cipher.decrypt(source["password"].encode()).decode()
         return MySQL(config)
 
-    @app.post(prefix + "/sources/{source_id}/test")
+    @app.post(prefix + "/sources/{source_id}/test", **operation("test_connection"))
     def test_connection(source_id: str):
         db = database(source_id)
         try:
@@ -139,7 +145,7 @@ def create_app(settings=None):
         finally:
             db.close()
 
-    @app.get(prefix + "/sources/{source_id}/objects")
+    @app.get(prefix + "/sources/{source_id}/objects", **operation("objects"))
     def objects(source_id: str, offset: int = 0, limit: int = 100, query: str = "", match: str = "fuzzy"):
         if offset < 0 or not 1 <= limit <= 500:
             raise ValueError("INVALID_PAGINATION")
@@ -159,7 +165,7 @@ def create_app(settings=None):
         finally:
             db.close()
 
-    @app.post(prefix + "/analyses", status_code=202)
+    @app.post(prefix + "/analyses", status_code=202, **operation("start_analysis", 202))
     def start_analysis(body: AnalysisRequest):
         source = store.get(body.source_id, "source")
         if source["type"] == "mysql":
@@ -182,17 +188,19 @@ def create_app(settings=None):
         store.log(job_id, "task.queued", "任务已入队，等待 Worker")
         return {"task_id": job_id}
 
-    @app.get(prefix + "/sources/{source_id}")
+    @app.get(prefix + "/sources/{source_id}", **operation("source_detail"))
     def source_detail(source_id: str):
         return public_source(store.get(source_id, "source"))
 
-    @app.get(prefix + "/sources/{source_id}/preview")
-    def source_preview(source_id: str, name: str = "", region: str = "A1:J20"):
+    @app.get(prefix + "/sources/{source_id}/preview", **operation("source_preview"))
+    def source_preview(source_id: str, name: str = "", region: str = "A1:J20", formatted: bool = False):
         source = store.get(source_id, "source")
         if source["type"] == "excel":
             sheet = name or source["sheets"][0]["name"]
             if sheet not in {item["name"] for item in source["sheets"]}:
                 raise ValueError("UNKNOWN_SHEET")
+            if formatted:
+                return preview_region(source["path"], sheet, region)
             return {"sheet": sheet, "region": region, "cells": read_region(source["path"], sheet, region)}
         if not name:
             raise ValueError("TABLE_NAME_REQUIRED")
@@ -207,7 +215,7 @@ def create_app(settings=None):
         finally:
             db.close()
 
-    @app.post(prefix + "/sources/{source_id}/sample")
+    @app.post(prefix + "/sources/{source_id}/sample", **operation("source_sample"))
     def source_sample(source_id: str, body: SamplePreviewRequest):
         db = database(source_id)
         try:
@@ -233,13 +241,13 @@ def create_app(settings=None):
         finally:
             db.close()
 
-    @app.get(prefix + "/analyses/{job_id}/logs")
+    @app.get(prefix + "/analyses/{job_id}/logs", **operation("task_logs"))
     def task_logs(job_id: str, after: int = 0, limit: int = 200):
         if after < 0 or not 1 <= limit <= 500:
             raise ValueError("INVALID_PAGINATION")
         return store.logs(job_id, after, limit)
 
-    @app.get(prefix + "/analyses")
+    @app.get(prefix + "/analyses", **operation("jobs"))
     def jobs(queue: str = "all"):
         if queue not in ("all", "analysis", "qa"):
             raise ValueError("INVALID_QUEUE")
@@ -249,16 +257,16 @@ def create_app(settings=None):
             if queue == "all" or job_queue(job) == queue
         ]
 
-    @app.get(prefix + "/analyses/{job_id}")
+    @app.get(prefix + "/analyses/{job_id}", **operation("job"))
     def job(job_id: str):
         return {key: value for key, value in store.get(job_id, "job").items() if key not in ("evidence", "draft")}
 
-    @app.get(prefix + "/analyses/{job_id}/preview")
+    @app.get(prefix + "/analyses/{job_id}/preview", **operation("preview"))
     def preview(job_id: str):
         task = store.get(job_id, "job")
         return {"version": task["version"], "findings": task["draft"], "evidence": task["evidence"]}
 
-    @app.put(prefix + "/analyses/{job_id}/mapping")
+    @app.put(prefix + "/analyses/{job_id}/mapping", **operation("mapping"))
     def mapping(job_id: str, body: MappingRequest):
         def update(payload):
             if payload["status"] != "awaiting_confirmation" or payload["version"] != body.version:
@@ -269,7 +277,7 @@ def create_app(settings=None):
         result = store.mutate(job_id, update)
         return {"version": result["version"]}
 
-    @app.post(prefix + "/analyses/{job_id}/confirm", status_code=202)
+    @app.post(prefix + "/analyses/{job_id}/confirm", status_code=202, **operation("confirm", 202))
     def confirm(job_id: str):
         def apply(payload):
             if payload["confirmed"]:
@@ -282,7 +290,7 @@ def create_app(settings=None):
         store.log(job_id, "task.confirmed", "人工确认已接收，等待继续分析")
         return {"task_id": job_id}
 
-    @app.post(prefix + "/analyses/{job_id}/cancel", status_code=202)
+    @app.post(prefix + "/analyses/{job_id}/cancel", status_code=202, **operation("cancel", 202))
     def cancel(job_id: str):
         def apply(payload):
             if payload["status"] not in TERMINAL:
@@ -294,7 +302,7 @@ def create_app(settings=None):
         store.log(job_id, "task.cancel_requested", "已收到取消请求", level="warning")
         return {"task_id": job_id, "status": result["status"], "cancel_requested": result["cancel_requested"]}
 
-    @app.post(prefix + "/analyses/{job_id}/retry", status_code=202)
+    @app.post(prefix + "/analyses/{job_id}/retry", status_code=202, **operation("retry", 202))
     def retry(job_id: str):
         previous = store.get(job_id, "job")
         if previous["status"] not in {"failed", "cancelled", "partial_success"}:
@@ -317,7 +325,7 @@ def create_app(settings=None):
         store.log(retry_id, "task.queued", "重试任务已入队，等待 Worker")
         return {"task_id": retry_id}
 
-    @app.get(prefix + "/snapshots")
+    @app.get(prefix + "/snapshots", **operation("snapshots"))
     def snapshots():
         return [
             {
@@ -329,7 +337,7 @@ def create_app(settings=None):
             for snap in store.list("snapshot")
         ]
 
-    @app.get(prefix + "/snapshots/{snapshot_id}/tables")
+    @app.get(prefix + "/snapshots/{snapshot_id}/tables", **operation("tables"))
     def tables(snapshot_id: str, query: str = "", offset: int = 0, limit: int = 50):
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("INVALID_PAGINATION")
@@ -341,29 +349,100 @@ def create_app(settings=None):
         ]
         return {"tables": rows[offset : offset + limit], "total": len(rows), "warnings": snap["findings"]["warnings"]}
 
-    @app.get(prefix + "/snapshots/{snapshot_id}/graph")
+    @app.get(prefix + "/snapshots/{snapshot_id}/graph", **operation("graph"))
     def graph(snapshot_id: str, kind: str = "er", root: str | None = None):
         if kind not in ("er", "lineage"):
             raise ValueError("INVALID_GRAPH_KIND")
         findings = store.get(snapshot_id, "snapshot")["findings"]
-        root = root or (findings["tables"][0]["name"] if findings["tables"] else None)
-        edges = [
+        if root is not None and root not in {table["name"] for table in findings["tables"]}:
+            raise ValueError("UNKNOWN_GRAPH_ROOT")
+        candidates = [
             edge
             for edge in findings["relationships" if kind == "er" else "lineage"]
-            if root in (edge["source_table"], edge["target_table"])
-        ][:200]
-        names = {root} | {edge[key] for edge in edges for key in ("source_table", "target_table")}
+            if root is None or root in (edge["source_table"], edge["target_table"])
+        ]
+        edges = candidates[:200]
+        names = {root} | {edge[key] for edge in candidates for key in ("source_table", "target_table")}
         return {
-            "tables": [table for table in findings["tables"] if table["name"] in names],
+            "tables": [table for table in findings["tables"] if root is None or table["name"] in names],
             "edges": edges,
             "root": root,
+            "total_edges": len(candidates),
+            "edges_truncated": len(candidates) > len(edges),
         }
 
-    @app.get(prefix + "/snapshots/{snapshot_id}/evidence/{evidence_id}")
+    @app.get(prefix + "/snapshots/{snapshot_id}/tables/{table_name:path}", **operation("table_detail"))
+    def table_detail(snapshot_id: str, table_name: str):
+        findings = store.get(snapshot_id, "snapshot")["findings"]
+        for table in findings["tables"]:
+            if table["name"] == table_name:
+                return table
+        raise HTTPException(404, "TABLE_NOT_FOUND")
+
+    @app.get(prefix + "/snapshots/{snapshot_id}/entity-graph", **operation("entity_graph"))
+    def entity_graph(
+        snapshot_id: str,
+        root: str | None = None,
+        origin: list[str] | None = Query(default=None),
+        confidence: list[str] | None = Query(default=None),
+        review: list[str] | None = Query(default=None),
+        limit: int = Query(default=5000, ge=1, le=5000),
+    ):
+        origins = set(filter(None, origin)) if origin is not None else {"constraint", "dictionary", "inferred"}
+        confidences = set(filter(None, confidence)) if confidence is not None else {"high", "medium", "low"}
+        reviews = set(filter(None, review)) if review is not None else {"pending", "confirmed"}
+        if (
+            not origins <= {"constraint", "dictionary", "inferred"}
+            or not confidences <= {"high", "medium", "low"}
+            or not reviews <= {"pending", "confirmed", "rejected"}
+        ):
+            raise ValueError("INVALID_ENTITY_GRAPH_FILTER")
+        findings = store.get(snapshot_id, "snapshot")["findings"]
+        if root is not None and root not in {table["name"] for table in findings["tables"]}:
+            raise ValueError("UNKNOWN_GRAPH_ROOT")
+        candidates = [
+            relation
+            for relation in findings["relationships"]
+            if relation["origin"] in origins
+            and relation.get("confidence", "medium") in confidences
+            and relation.get("review", "pending") in reviews
+            and (root is None or root in (relation["source_table"], relation["target_table"]))
+        ]
+        candidates.sort(
+            key=lambda relation: (
+                relation.get("id", ""),
+                relation["source_table"],
+                relation["target_table"],
+                tuple(relation["source_columns"]),
+                tuple(relation["target_columns"]),
+            )
+        )
+        names = {root} | {relation[key] for relation in candidates for key in ("source_table", "target_table")}
+        nodes = [
+            {
+                "id": table["name"],
+                "name": table["name"],
+                "kind": table.get("kind", "table"),
+                "comment": table.get("comment", ""),
+                "column_count": len(table["columns"]),
+            }
+            for table in findings["tables"]
+            if root is None or table["name"] in names
+        ]
+        return {
+            "nodes": nodes,
+            "relationships": candidates[:limit],
+            "root": root,
+            "total_relationships": len(candidates),
+            "returned_relationships": min(limit, len(candidates)),
+            "truncated": len(candidates) > limit,
+        }
+
+    @app.get(prefix + "/snapshots/{snapshot_id}/evidence/{evidence_id}", **operation("evidence"))
     def evidence(snapshot_id: str, evidence_id: str):
         return store.get(snapshot_id, "snapshot")["evidence"][evidence_id]
 
-    @app.patch(prefix + "/relationships/{relationship_id}")
+    @app.patch(prefix + "/relationships/{relationship_id}", **operation("review"))
     def review(relationship_id: str, snapshot_id: str, body: ReviewRequest):
         def apply(payload):
             relation = next((r for r in payload["findings"]["relationships"] if r["id"] == relationship_id), None)
@@ -377,7 +456,7 @@ def create_app(settings=None):
         store.mutate(snapshot_id, apply)
         return {"status": body.status}
 
-    @app.post(prefix + "/snapshots/{snapshot_id}/questions", status_code=202)
+    @app.post(prefix + "/snapshots/{snapshot_id}/questions", status_code=202, **operation("question", 202))
     def question(snapshot_id: str, body: QuestionRequest):
         store.get(snapshot_id, "snapshot")
         conversation_id = body.conversation_id
@@ -390,7 +469,7 @@ def create_app(settings=None):
         store.log(job_id, "task.queued", "问答任务已入队，等待 Worker")
         return {"task_id": job_id, "conversation_id": conversation_id}
 
-    @app.get(prefix + "/conversations")
+    @app.get(prefix + "/conversations", **operation("conversations"))
     def conversations(snapshot_id: str | None = None, offset: int = 0, limit: int = 20):
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("INVALID_PAGINATION")
@@ -418,7 +497,7 @@ def create_app(settings=None):
         records.sort(key=lambda info: info["updated"], reverse=True)
         return {"conversations": records[offset : offset + limit], "total": len(records)}
 
-    @app.get(prefix + "/conversations/{conversation_id}")
+    @app.get(prefix + "/conversations/{conversation_id}", **operation("conversation"))
     def conversation(conversation_id: str):
         info = store.get(conversation_id, "conversation")
         info["answers"] = sorted(
@@ -432,7 +511,7 @@ def create_app(settings=None):
         ]
         return info
 
-    @app.get(prefix + "/snapshots/{snapshot_id}/exports/{format}")
+    @app.get(prefix + "/snapshots/{snapshot_id}/exports/{format}", **operation("export"))
     def export(snapshot_id: str, format: str):
         snap = store.get(snapshot_id, "snapshot")
         if format == "json":

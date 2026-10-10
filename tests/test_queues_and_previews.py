@@ -132,6 +132,7 @@ def test_previews_read_raw_evidence_without_jobs_or_model(client, store, monkeyp
 
     class Database:
         samples = 0
+        sampled_columns = []
 
         def __init__(self, _config):
             pass
@@ -139,11 +140,24 @@ def test_previews_read_raw_evidence_without_jobs_or_model(client, store, monkeyp
         def describe(self, names):
             if names != ["users"]:
                 raise ValueError("UNKNOWN_TABLE")
-            return [{"name": "users", "columns": [{"name": "id", "type": "bigint"}]}], [], {}, []
+            return (
+                [
+                    {
+                        "name": "users",
+                        "columns": [
+                            {"name": name, "type": "bigint"} for name in ["id"] + [f"field_{i}" for i in range(25)]
+                        ],
+                    }
+                ],
+                [],
+                {},
+                [],
+            )
 
         def sample(self, table, columns, limit):
             type(self).samples += 1
-            return [{"id": "x" * 500} for _ in range(limit)]
+            type(self).sampled_columns = columns
+            return [{column: "x" * 500 for column in columns} for _ in range(limit)]
 
         def close(self):
             pass
@@ -155,6 +169,10 @@ def test_previews_read_raw_evidence_without_jobs_or_model(client, store, monkeyp
         f"/api/v1/sources/{source}/sample", json={"table": "users", "columns": ["id"], "limit": 20}
     ).json()
     assert len(rows["rows"]) == 20 and len(rows["rows"][0]["id"]) == 200 and rows["sent_to_model"] is False
+    wide_columns = ["id"] + [f"field_{i}" for i in range(25)]
+    wide = client.post(f"/api/v1/sources/{source}/sample", json={"table": "users", "columns": wide_columns})
+    assert wide.status_code == 200 and Database.sampled_columns == wide_columns
+    assert len(wide.json()["rows"][0]) == 26
     assert (
         client.post(f"/api/v1/sources/{source}/sample", json={"table": "users", "columns": ["missing"]}).status_code
         == 400

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Edge, type Node, type NodeProps } from '@xyflow/react';
+import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, useNodesInitialized, useReactFlow, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import { Alert, Button, Empty, Space, Tag } from 'antd';
 import { toPng, toSvg } from 'html-to-image';
@@ -13,11 +13,35 @@ function TableCard({ data }: NodeProps<TableNode>) {
 const nodeTypes = { table: TableCard };
 const elk = new ELK();
 
+function FitGraph({ nodes, fullscreen }: { nodes: TableNode[]; fullscreen: boolean }) {
+  const initialized = useNodesInitialized();
+  const { fitView } = useReactFlow();
+  useEffect(() => {
+    if (!initialized || !nodes.length) return;
+    const frame = requestAnimationFrame(() => { void fitView({ padding: 0.12, minZoom: 0.01, maxZoom: 1 }); });
+    return () => cancelAnimationFrame(frame);
+  }, [initialized, nodes, fullscreen, fitView]);
+  return null;
+}
+
 export default function GraphView({ graph, onEdge }: { graph?: Graph; onEdge: (edge: Relation) => void }) {
   const [nodes, setNodes] = useState<TableNode[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [error, setError] = useState('');
+  const [fullscreen, setFullscreen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const fullscreenRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    function changed() { setFullscreen(document.fullscreenElement === fullscreenRef.current); }
+    document.addEventListener('fullscreenchange', changed);
+    return () => document.removeEventListener('fullscreenchange', changed);
+  }, []);
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement === fullscreenRef.current) await document.exitFullscreen();
+      else await fullscreenRef.current?.requestFullscreen();
+    } catch { setError('无法进入全屏，请检查浏览器是否允许全屏展示。'); }
+  }
   useEffect(() => {
     let active = true;
     if (!graph) { setNodes([]); setEdges([]); return; }
@@ -37,5 +61,6 @@ export default function GraphView({ graph, onEdge }: { graph?: Graph; onEdge: (e
       const link = document.createElement('a'); link.href = url; link.download = 'metadata-graph.'+format; link.click();
     } catch (e) { setError(String(e)); }
   }
-  return <><div className="graph-toolbar"><Space><Tag color="blue">实线：声明 / 血缘</Tag><Tag color="gold">虚线：推断关联</Tag><span className="muted">当前对象的一跳关系 · 点击连线查看证据</span></Space><Space><Button onClick={() => void download('svg')}>导出 SVG</Button><Button onClick={() => void download('png')}>导出 PNG</Button></Space></div>{error && <Alert type="error" message={error}/>}<div className="graph-canvas" ref={ref}>{nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView onEdgeClick={(_, edge) => onEdge(edge.data?.relation as Relation)}><Background/><Controls/><MiniMap pannable zoomable/></ReactFlow> : <Empty description="选择快照和表以查看关系图"/>}</div></>;
+  return <div className="graph-view" ref={fullscreenRef}><div className="graph-toolbar"><Space><Tag color="blue">实线：声明 / 血缘</Tag><Tag color="gold">虚线：推断关联</Tag><span className="muted">{graph?.root ? '中心表一跳关系' : '当前快照全部表'} · {nodes.length} 个对象 · {edges.length} 条连线 · 点击连线查看证据</span></Space><Space><Button onClick={() => void toggleFullscreen()}>{fullscreen ? '退出全屏' : '全屏展示'}</Button><Button onClick={() => void download('svg')}>导出 SVG</Button><Button onClick={() => void download('png')}>导出 PNG</Button></Space></div>{graph?.edges_truncated && <Alert type="warning" showIcon message={`当前展示 ${edges.length}/${graph.total_edges} 条连线；表节点完整保留，可选择中心表缩小范围。`}/>}
+    {error && <Alert type="error" message={error}/>}<div className="graph-canvas" ref={ref}>{nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} minZoom={0.01} fitView fitViewOptions={{ minZoom: 0.01, maxZoom: 1, padding: 0.12 }} onEdgeClick={(_, edge) => onEdge(edge.data?.relation as Relation)}><FitGraph nodes={nodes} fullscreen={fullscreen}/><Background/><Controls/><MiniMap pannable zoomable/></ReactFlow> : <Empty description="当前快照没有表，请先选择已发布快照"/>}</div></div>;
 }

@@ -112,24 +112,28 @@ class MySQLSource(StrictModel):
     host: str = Field(min_length=1)
     port: int = Field(default=3306, ge=1, le=65535)
     username: str = Field(min_length=1)
-    password: str
+    password: str = Field(
+        description="只读数据库账号密码；加密存储，不出现在公开响应", json_schema_extra={"writeOnly": True}
+    )
     database: str = Field(min_length=1)
 
 
 class AnalysisRequest(StrictModel):
-    source_id: str
-    tables: list[str] = Field(default_factory=list, max_length=500)
-    allow_samples: bool = False
+    source_id: str = Field(description="已上传Excel或已创建MySQL数据源的id")
+    tables: list[str] = Field(
+        default_factory=list, max_length=500, description="MySQL必须显式选择1–500个唯一表/视图；Excel留空"
+    )
+    allow_samples: bool = Field(default=False, description="是否允许DSH读取受控原始样本；默认仅结构/统计证据")
 
 
 class MappingRequest(StrictModel):
-    version: int
+    version: int = Field(description="读取草稿得到的当前版本；冲突返回409")
     findings: Findings
 
 
 class QuestionRequest(StrictModel):
     question: str = Field(min_length=1, max_length=4000)
-    conversation_id: str | None = None
+    conversation_id: str | None = Field(default=None, description="省略创建新会话；传入继续当前快照的既有会话")
 
 
 class ReviewRequest(StrictModel):
@@ -139,5 +143,5 @@ class ReviewRequest(StrictModel):
 
 class SamplePreviewRequest(StrictModel):
     table: str = Field(min_length=1, max_length=256)
-    columns: list[str] = Field(min_length=1, max_length=20)
+    columns: list[str] = Field(min_length=1, max_length=4096)
     limit: int = Field(default=10, ge=1, le=20)

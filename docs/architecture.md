@@ -71,6 +71,7 @@ flowchart TB
 | 结果持久化 | SQLite、SQLAlchemy、Alembic | 任务、草稿、快照、证据、审核和问答 |
 | 测试界面 | React、TypeScript、Vite、Ant Design | 数据源、预览确认、任务、图、问答和导出 |
 | 图组件 | React Flow + ELK.js | 自定义表节点、字段连线、布局及局部展开 |
+| 实体关系力导图 | 按需加载 Cytoscape.js + d3-force Web Worker | 仅投影已发布关联；独立于React Flow/ELK；静态布局及可暂停轻微浮动 |
 
 第一版无需 Redis、Neo4j 或向量数据库。元数据检索采用对象名称、注释与索引查询，关系遍历读取持久化边。
 
@@ -223,14 +224,18 @@ stateDiagram-v2
 
 所有接口位于 `/api/v1`，提供 Swagger `/docs`；分析和问答请求返回 `202` 与任务 ID。公开响应不含连接密码、主密钥或服务器绝对文件路径。
 
+文档规范入口统一为 `/api/v1/docs` 和 `/api/v1/openapi.json`，`/docs`及`/redoc`重定向Swagger、`/openapi.json`重定向规范。`api_docs.py`集中声明29项当前业务操作的标签、中文摘要/描述、请求示例、主要响应Schema及错误结构，通过FastAPI原生OpenAPI生成；响应文档模型不改变现有业务响应或执行额外结果校验。请求模型仍执行既有输入校验，422按实际loc/type/msg记录，不暴露输入。`docs/api.md`为接入流程与curl参考，不能用其替代实际OpenAPI字段。
+
+采用FastAPI官方自托管文档方式，Python锁定`swagger-ui-bundle==1.1.0`，只提供其静态资源；`/api/v1/docs/assets`、规范和UI均由同一API服务提供，不依赖CDN、前端构建或DSH连接。静态挂载在前端根挂载之前，反向代理root_path用于文档资源URL。Vite将/api及兼容/docs、/redoc、/openapi.json转发到METADATA_API_PORT；侧栏链接使用/api/v1/docs并另提供OpenAPI JSON，避免/docs被SPA fallback吞掉。默认同源，不新增CORS、鉴权或分析逻辑。选型参考[FastAPI自托管文档](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/)。
+
 | 方法与路径 | 主要行为 |
 | --- | --- |
 | `POST /sources/excel` | multipart 上传，返回 Source ID |
 | `POST /sources/mysql` | 保存连接参数与加密凭据，返回脱敏的数据源信息 |
 | `POST /sources/{id}/test` | 确定性连接测试，返回版本、可达性和权限告警 |
 | `GET /sources/{id}` | 数据源详情，隐藏密码及本地路径 |
-| `GET /sources/{id}/preview` | name为MySQL表/视图或Excel Sheet；MySQL批量适配器读取单对象原始结构，Excel可指定region（默认A1:J20，最多2000单元格） |
-| `POST /sources/{id}/sample` | MySQL table、columns（1–20且必须存在）、limit（1–20，默认10）；只读首批行，每值截断200字符，sent_to_model=false；不写任务或快照 |
+| `GET /sources/{id}/preview` | name为MySQL表/视图或Excel Sheet；MySQL批量适配器读取单对象原始结构，Excel可指定region（API默认A1:J20，最多2000单元格）；formatted=true返回用于网格展示的行列尺寸、隐藏状态、单元格文本/样式和合并跨度，未设置时保持原证据读取契约 |
+| `POST /sources/{id}/sample` | MySQL table、columns（1–4096且必须是当前表真实字段；浏览器默认全选，可删减）、limit（1–20，默认10）；只读首批行，每值截断200字符，sent_to_model=false；不写任务或快照 |
 | `GET /sources/{id}/objects` | MySQL 表/视图名筛选：query（最多256字符）、match=fuzzy/regex、offset、limit（1–500，默认100）；先排序过滤再分页，返回 objects、过滤后 total、全库 source_total；Excel 的已识别对象由草稿接口提供 |
 | `POST /analyses` | 接收 Source ID、范围和分析选项，返回任务 ID |
 | `GET /analyses` | queue=all/analysis/qa筛选队列，默认all；历史任务按question是否存在兼容分类 |
@@ -242,7 +247,9 @@ stateDiagram-v2
 | `POST /analyses/{id}/cancel` | 请求取消，返回当前状态 |
 | `POST /analyses/{id}/retry` | 创建关联的重试任务，返回新任务 ID |
 | `GET /snapshots/{id}/tables` | 分页查询表与字段，支持搜索 |
-| `GET /snapshots/{id}/graph` | `kind=er/lineage`、层级、方向、根对象和展开范围 |
+| `GET /snapshots/{id}/tables/{table_name:path}` | 按完整名称精确查询已保存表/视图及字段、证据引用；不存在返回404 TABLE_NOT_FOUND |
+| `GET /snapshots/{id}/entity-graph` | 轻量节点和原始relationships；origin/confidence/review可重复参数、root可选；limit默认/最大5000；先筛选和稳定排序再截断，返回total_relationships、returned_relationships、truncated；未知root返回400 UNKNOWN_GRAPH_ROOT，非法筛选返回400 INVALID_ENTITY_GRAPH_FILTER |
+| `GET /snapshots/{id}/graph` | `kind=er/lineage`；无root返回快照全部表，指定root返回一跳子图；最多200条边，返回total_edges和edges_truncated，非法root返回400 |
 | `GET /snapshots/{id}/evidence/{evidence_id}` | 查询当前快照的证据 |
 | `PATCH /relationships/{id}` | 审核或更正候选，保存变更记录 |
 | `POST /snapshots/{id}/questions` | 提交问题及可选会话 ID，返回问答任务 ID |
@@ -253,7 +260,23 @@ stateDiagram-v2
 
 界面采用中文桌面工作台：数据源 → Excel 预览 → 任务详情 → 元数据浏览 → ER/血缘 → 问答。图与列表共享过滤条件，右侧显示对象或关系证据，审核操作保留原始来源。
 
-默认每两秒查询任务状态，终态停止轮询。等待确认、空结果、未知依赖、部分成功和失败均有独立展示。图默认一跳、按需展开；表字段列表分页，不一次渲染全部图节点。
+默认每两秒查询任务状态，终态停止轮询。等待确认、空结果、未知依赖、部分成功和失败均有独立展示。图默认展示快照全部表（包括无边节点），选择中心表后显示一跳子图，清除后恢复全图。中心表候选不受表字段搜索过滤影响。每节点最多预览12字段，最多200条连线，显式显示截断告警；React Flow最低缩放0.01，布局及节点测量完成后fitView。表字段列表继续分页。页面采用视口高度Flex布局、min-height:0和overflow约束，右侧Content独立滚动，顶部Header不收缩，左侧导航仅自身溢出时滚动。
+
+### 7.1 实体关系力导图
+
+第三个Tab由 `EntityGraph.tsx` 按需加载，`ForceGraphCanvas.tsx` 使用Cytoscape Canvas及preset坐标；原ER/血缘图继续使用React Flow/ELK和200条边预算。Python只查询、筛选和投影已有快照，不增加DSH调用、分析算法或MCP工具。现有分析Skills契约保持不变。这里“实体”指表/视图，力导布局不等于业务实体识别。
+
+`entity-graph` 节点只含id、name、kind、comment、column_count；关系复用已保存的完整关联结构和evidence_ids。默认origin为constraint/dictionary/inferred，confidence为high/medium/low，review为pending/confirmed。省略筛选参数使用默认，传空值代表空选择；显式加入rejected才包含驳回项。无root保留全部表/视图；有root保留中心及筛选后全部一跳邻居，再截断原始关系，默认及最大5000，按id及端点/字段稳定排序。轻量接口不返回全部字段，节点抽屉通过精确详情接口按需读取。
+
+前端按 `(source_table,target_table,origin,review)` 聚合展示连线，方向不同不合并；自关联保留，复合字段及证据不拆分或改写。点击连线列出全部原始关系，复用既有审核和证据接口。审核后失效图查询缓存，但保留几何坐标。表圆形/视图菱形、三类来源的颜色及线型、文字图例、缩放标签和邻居高亮均属展示。单击节点只选中，双击 `dbltap` 才打开字段抽屉；定位操作单独适配选中节点，避免单击移动视口妨碍双击；列表/按钮提供键盘操作替代。
+
+`forceLayout.worker.ts` 仅接收标识、连线端点及坐标/固定坐标，不传字段、注释、证据正文或凭据。`forceLayout.ts` 按标识排序，固定随机种子，使用连线吸引、排斥、碰撞及居中力；物理弹簧可去重，但不删除展示中的多重或自关联边。最多300轮或5秒返回当前坐标，每20轮发送真实进度。Worker异常或6.5秒看门狗触发时保留已有坐标，新节点回退网格并提示。新布局终止旧Worker，generation与active检查屏蔽过期消息；卸载释放Worker、ResizeObserver、全屏监听和Cytoscape实例。
+
+初次物理模拟结束后停止；默认开启独立的轻微浮动，`floatingPosition` 在布局锚点周围每轴最多5个单位变化，requestAnimationFrame限频15fps批量更新。固定、选中和悬停节点不浮动，拖动或布局中不更新，不可见页面跳过更新。按钮可暂停/开启，prefers-reduced-motion默认关闭且系统切换为减少动态时停止；动画不更新会话坐标、不回写快照，卸载取消动画帧。大图浮动的Canvas性能需单独浏览器验收。
+
+`ForceMemory` 在当前快照页面会话内保存布局坐标、固定集合和布局完成状态，切Tab可复用，筛选/审核/全屏不重新计算已有布局；刷新或切换快照不持久化。拖动或键盘移动写入固定坐标，解除固定后可重新布局。全屏以实体图容器为宿主，保留筛选和工具栏，弹层挂载到当前全屏元素，Esc由浏览器退出。PNG使用Cytoscape blob-promise导出当前视口或全部已加载图，最大4096×4096，释放下载URL；力导图不增加SVG，JSON仍由既有快照导出提供。接口截断告警同时适用于“完整图”PNG。
+
+选型参考 [Cytoscape.js](https://js.cytoscape.org/) 和 [D3静态布局/Worker](https://d3js.org/d3-force/simulation)。布局计算属于展示几何，全部语义分析仍由DSH负责；没有新增运行时插件或Skills分析步骤。
 
 ## 8. 隔离、配置与单机部署
 
@@ -321,6 +344,7 @@ API 只交付事件投影，不将原始 runner.log 或 DSH 会话暴露给前�
 - MCP 契约测试：工具 schema、错误码、分页、任务范围、幂等写入、样本限制与工具清单。
 - DSH 集成测试：通过官方 SDK 运行真实 DSH，验证工具发现、调用事件、工具错误反馈、合法结果发布和进程回收；稳定场景使用可控模型端点。
 - API 测试：上传、预览确认、状态机、重试、取消、清理、图查询及答案证据引用。
+- 力导图契约与布局：`tests/test_entity_graph.py`覆盖先筛选后截断、审核默认值、一跳节点、孤立/自关联/复合字段及精确详情；`cd frontend`后执行`npm run test:force`验证合并、确定性、固定坐标、预算、浮动边界及Worker进度/终止。Windows浏览器另验500节点/5000关系的绘制、输入响应、浮动/双击、全屏/PNG及切换资源回收，并记录布局与可操作耗时。
 - 前端端到端：文件与数据库两入口、任务轮询、图过滤展开、关系审核、问答跳转及导出。
 - 百炼真实验证：显式启用，使用独立测试库及样例文件，核对 DSH 会话事件与正式产物，不以模型口头报告替代工具证据。
 
@@ -348,3 +372,7 @@ API 只交付事件投影，不将原始 runner.log 或 DSH 会话暴露给前�
 ## 11. 代码与文档一致性
 
 遵循 [agent.md 公约](../agent.md)：代码与需求、架构、相关 README/Skills 同步修改、同步审查、同次提交。职责、工具契约或默认限制发生变化时，交付前必须核对文档与实际代码；实施记录明确未实现及未验证范围。本次边界修订以 DSH 承担全部分析、MCP 属于 DSH 插件为准，替代旧版 SQL 静态分析工具方案。
+
+SourceDetails保留数据源概览，表结构与样例使用Modal+Tabs。selectedColumns未设置时从原始结构派生全部字段，用户选择后使用所选列，切换表时重置；样例仍显式读取且只存组件内存。仅浏览器预览API列上限调整为4096，DSH sample_rows仍最多20列且共享原任务预算。ExcelPreview自动打开首个Sheet，默认最多40列、100行且总计不超过2000单元格；原始适配器preview_region直接投影工作簿格式，无分析推断。HTML table按原坐标展示空格与合并，行列标题固定，区域内独立滚动；颜色解析RGB/索引/工作簿主题和tint，XLSX保留常见边框与文本样式，XLS保留合并/尺寸/字体/填充/对齐。不计算公式或加载图片/外部链接，复杂数字格式近似展示。该新预览契约不暴露为DSH工具，read_region和Skills无需变化。
+
+图类型使用er/lineage两个Tab，GraphView容器使用浏览器Fullscreen API；监听fullscreenchange更新按钮，Esc由浏览器退出，拒绝全屏时显示错误提示。全屏使用Flex让画布填满剩余高度，切换时重新fitView；关系详情与证据弹层优先挂载到当前全屏元素，避免浏览器全屏时不可见。

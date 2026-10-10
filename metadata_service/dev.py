@@ -73,7 +73,7 @@ def main():
                 )
                 processes.append((name, process))
             print(
-                f"Frontend: http://127.0.0.1:{ui_port}\nREST API: http://127.0.0.1:{api_port}/docs\nLogs: {logs}\nStop: Ctrl+C",
+                f"Frontend: http://127.0.0.1:{ui_port}\nREST API: http://127.0.0.1:{api_port}/api/v1/docs\nLogs: {logs}\nStop: Ctrl+C",
                 flush=True,
             )
             while True:
