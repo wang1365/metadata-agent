@@ -69,12 +69,16 @@ class LineageEdge(StrictModel):
     evidence_ids: list[str] = Field(min_length=1)
 
 
-class Findings(StrictModel):
+class FindingsInput(StrictModel):
+    """Tool input schema; cross-object references are checked after merging a batch."""
+
     tables: list[Table] = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
     lineage: list[LineageEdge] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
+
+class Findings(FindingsInput):
     @model_validator(mode="after")
     def check_objects(self):
         by_name = {table.name: table for table in self.tables}

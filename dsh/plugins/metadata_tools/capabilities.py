@@ -1,12 +1,24 @@
 import json
+import threading
+from functools import wraps
+from typing import Literal
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from metadata_service.models import Findings
+from metadata_service.models import Findings, FindingsInput
 from metadata_service.store import uid
 
 from . import excel
 from .mysql import MySQL
+
+
+def serialized_save(function):
+    @wraps(function)
+    def save(self, *args, **kwargs):
+        with self._save_lock:
+            return function(self, *args, **kwargs)
+
+    return save
 
 
 class Capabilities:
@@ -14,6 +26,7 @@ class Capabilities:
 
     def __init__(self, store, job_id):
         self.store, self.job_id = store, job_id
+        self._save_lock = threading.RLock()
 
     def job(self):
         return self.store.active(self.job_id)
@@ -58,13 +71,56 @@ class Capabilities:
         )
         return {"cells": cells, "evidence_ids": [evidence_id]}
 
-    def save_dictionary_draft(self, findings: dict) -> dict:
-        """Save Excel tables/columns/keys with region evidence. User confirmation is required next."""
+    def merge_input(self, findings, mode):
+        chunk = FindingsInput.model_validate(findings).model_dump()
+        if mode == "replace":
+            return chunk
+        if mode != "merge":
+            raise ValueError("INVALID_SAVE_MODE")
+        if len(chunk["tables"]) > 20:
+            raise ValueError("BATCH_LIMIT: merge accepts at most 20 tables")
+        draft = self.job()["draft"]
+        for field, identity in [
+            ("tables", lambda item: item["name"]),
+            (
+                "relationships",
+                lambda item: (
+                    item["source_table"],
+                    tuple(item["source_columns"]),
+                    item["target_table"],
+                    tuple(item["target_columns"]),
+                    item["origin"],
+                ),
+            ),
+            (
+                "lineage",
+                lambda item: (
+                    item["source_table"],
+                    item.get("source_column"),
+                    item["target_table"],
+                    item.get("target_column"),
+                    item.get("expression", ""),
+                ),
+            ),
+        ]:
+            merged = {identity(item): item for item in draft[field]}
+            for item in chunk[field]:
+                key = identity(item)
+                if field == "relationships" and not item["id"] and key in merged:
+                    item["id"] = merged[key]["id"]
+                merged[key] = item
+            draft[field] = list(merged.values())
+        draft["warnings"] = list(dict.fromkeys(draft["warnings"] + chunk["warnings"]))
+        return draft
+
+    @serialized_save
+    def save_dictionary_draft(self, findings: FindingsInput, mode: Literal["replace", "merge"] = "replace") -> dict:
+        """Save a typed Excel draft. Use merge for batches of <=20 tables; wait for user confirmation after all batches."""
         self.source("excel")
-        job = self.store.save_draft(self.job_id, findings, preview=True)
+        job = self.store.save_draft(self.job_id, self.merge_input(findings, mode), preview=True)
         return {
             "version": job["version"],
-            "next": "Return to the user; mapping confirmation is required before finalization.",
+            "next": "Save remaining batches with mode=merge, then return for user confirmation; do not finalize.",
         }
 
     def list_objects(self) -> dict:
@@ -251,11 +307,12 @@ class Capabilities:
             raise ValueError("UNKNOWN_EVIDENCE")
         return {"evidence": [evidence[ref] for ref in evidence_ids]}
 
-    def save_findings(self, findings: dict) -> dict:
-        """Save the complete merged findings document. Must preserve collected objects and evidence."""
+    @serialized_save
+    def save_findings(self, findings: FindingsInput, mode: Literal["replace", "merge"] = "replace") -> dict:
+        """Save typed findings. Prefer mode=merge for <=20 tables or relation/lineage batches, without rewriting the full draft."""
         job = self.job()
         self.source()
-        parsed = Findings.model_validate(findings)
+        parsed = Findings.model_validate(self.merge_input(findings, mode))
         original = Findings.model_validate(job["draft"])
         if job["confirmed"] and parsed.tables != original.tables:
             raise ValueError("CONFIRMED_MAPPING_IMMUTABLE")

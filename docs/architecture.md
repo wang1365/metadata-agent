@@ -153,6 +153,8 @@ MCP 启动凭据显式配置。DSH 官方 MCP Client 会清理部分敏感环境
 
 DSH 通过 `save_findings` 分批写入，Pydantic 校验对象引用、字段组和证据范围；`finalize_snapshot` 校验草稿一致性后在事务中发布结果。
 
+`save_findings` 和 `save_dictionary_draft` 的 findings 参数使用 `FindingsInput` 显式模型，MCP 向 DSH 提供 tables/relationships/lineage/warnings 的完整嵌套 JSON Schema，根节点不接受 source、scope 等额外字段。`mode=replace` 为兼容的默认完整替换；Skills 优先使用 `mode=merge` 小批提交，每批最多 20 张表，建议 1–5 张，字段多时缩小。合并只按表名、关系端点/来源、血缘端点/表达式保存 DSH 已给出的条目，不生成任何语义结果；未涉及条目与关系 ID 保留，告警去重。引用校验在合并后执行，允许关系/血缘批次引用已有草稿对象。单任务 MCP 实例串行化保存操作，避免并行工具批次互相覆盖。
+
 Worker 仅在 DSH 正常完成且存在本次执行发布的合法快照时，将分析任务标记为成功或部分成功。问答必须存在本次执行保存的合法答案。最终自然语言回答是摘要，不是元数据落库协议。
 
 幂等键与任务范围绑定，重复工具调用不重复创建发现。重试建立新执行记录并读取已有草稿，不自动重复已完成的写入。工具错误交给 DSH 处理，不在上层创建模型输出修复循环。
@@ -275,7 +277,7 @@ Worker 为任务创建专属进程组或等效进程树管理对象，正常退�
 
 SQLite 独立 `task_events` 表保存有序 `seq`、任务 ID、时间和事件负载，不把日志追加到任务大 JSON 中。每任务保留最近 5000 条，通过任务范围过滤和递增游标分页；确认后继续执行保留同一任务日志，并以 execution_id 区分两次执行。重试任务有独立日志，原任务保持可查询。首次启动通过建表自动兼容现有本地结果库，正式迁移体系仍在待办中。
 
-`metadata_service.progress.DSHProgress` 订阅官方 SDK `session.event`，投影 `request/header`、`assistant/message`、`turn/end` 的安全摘要，不读取模型正文。`request/header` 是 DSH 任务请求事件，不声称对应每次底层模型 API 调用。MCP 插件 `server.logged_tool` 保留原工具签名、权限与返回值，在真实工具执行前后记录名称、耗时、有限计数或安全错误码；分析、推断和工具选择继续由 DSH 执行。
+`metadata_service.progress.DSHProgress` 订阅官方 SDK `session.event`，投影 `request/header`、`assistant/message`、`turn/end` 的安全摘要，不读取模型正文。`request/header` 是 DSH 任务请求事件，不声称对应每次底层模型 API 调用。`turn/end.data.reason.kind` 映射为安全结束码：max-tokens → DSH_MAX_TOKENS、error → DSH_MODEL_ERROR、cancelled → DSH_CANCELLED；缺少结束事件使用 DSH_NO_TURN_END，工具未观测到使用 DSH_TOOLS_NOT_OBSERVED。日志和任务 error 保留具体代码，非正常结束仍失败且不自动续写。SDK tool/result 的 isError 额外投影为 DSH_TOOL_ERROR，覆盖进入工具函数之前的输入 Schema 校验失败，绝不输出错误原文。MCP 插件 `server.logged_tool` 保留原工具签名、权限与返回值，在真实工具执行前后记录名称、耗时、有限计数或安全错误码；分析、推断和工具选择继续由 DSH 执行。
 
 Worker 记录领取、15 秒心跳、取消/超时/中断，按游标将 runner/MCP 事件转发到自己的 stderr。开发监督进程将 worker.log 中的结构化事件同步输出到终端；runner 本地 stderr 仍保留在任务目录 runner.log。MCP stdout 与 SDK JSON-RPC stdout 不用于普通日志。
 

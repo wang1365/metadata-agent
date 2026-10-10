@@ -10,7 +10,7 @@ import sys
 from deepseek_harness import DeepSeekHarness
 
 from .config import ROOT, get_settings
-from .progress import DSHProgress, safe_error_code
+from .progress import DSHProgress, safe_error_code, turn_failure
 from .store import Store
 
 
@@ -193,8 +193,11 @@ def run_task(store, job_id):
         current = store.get(job_id, "job")
         if current["cancel_requested"]:
             return
-        if result.finish_reason != "completed" or not observed:
-            raise RuntimeError("DSH_TURN_FAILED")
+        if result.finish_reason != "completed":
+            code, _message = turn_failure(result.finish_reason)
+            raise RuntimeError(code)
+        if not observed:
+            raise RuntimeError("DSH_TOOLS_NOT_OBSERVED")
         if current.get("question"):
             status = "succeeded" if current["answer_id"] else "failed"
         elif current["snapshot_id"]:
@@ -221,17 +224,27 @@ def run_task(store, job_id):
             )
     except Exception as exc:
         # SDK diagnostics can include task/sample content. Keep them only in ignored logs.
+        code = safe_error_code(exc)
+        messages = {
+            value[0]: value[1]
+            for value in [
+                turn_failure("max-tokens"),
+                turn_failure("error"),
+                turn_failure("cancelled"),
+                turn_failure(None),
+            ]
+        }
         store.log(
             job_id,
             "runtime.failed",
-            "DSH 执行失败；请根据事件阶段定位，必要时检查本机运行诊断",
+            messages.get(code, "DSH 执行失败；请根据事件阶段定位，必要时检查本机运行诊断"),
             level="error",
-            code=safe_error_code(exc),
+            code=code,
         )
 
         def fail(payload):
             if payload["status"] == "running" and not payload["cancel_requested"]:
-                payload.update(status="failed", stage="执行失败", error="DSH_EXECUTION_FAILED")
+                payload.update(status="failed", stage="执行失败", error=code)
 
         store.mutate(job_id, fail)
 
