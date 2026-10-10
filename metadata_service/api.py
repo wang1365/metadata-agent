@@ -8,12 +8,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from dsh.plugins.metadata_tools.excel import inspect_workbook
+from dsh.plugins.metadata_tools.excel import inspect_workbook, read_region
 from dsh.plugins.metadata_tools.mysql import MySQL, filter_objects
 
 from .config import ROOT, get_settings
-from .models import AnalysisRequest, MappingRequest, MySQLSource, QuestionRequest, ReviewRequest
-from .store import TERMINAL, Store, now, uid
+from .models import AnalysisRequest, MappingRequest, MySQLSource, QuestionRequest, ReviewRequest, SamplePreviewRequest
+from .store import TERMINAL, Store, job_queue, now, uid
 
 
 def public_source(source):
@@ -56,7 +56,14 @@ def create_app(settings=None):
 
     @app.get(prefix + "/health")
     def health():
-        return {"status": "ok", "runtime": "deepseek-harness", "worker": "external", "model": settings.model}
+        return {
+            "status": "ok",
+            "runtime": "deepseek-harness",
+            "worker": "external",
+            "model": settings.model,
+            "queues": {"analysis": settings.analysis_concurrency, "qa": settings.qa_concurrency},
+            "display_timezone": "Asia/Shanghai",
+        }
 
     @app.get(prefix + "/sources")
     def sources():
@@ -175,6 +182,57 @@ def create_app(settings=None):
         store.log(job_id, "task.queued", "任务已入队，等待 Worker")
         return {"task_id": job_id}
 
+    @app.get(prefix + "/sources/{source_id}")
+    def source_detail(source_id: str):
+        return public_source(store.get(source_id, "source"))
+
+    @app.get(prefix + "/sources/{source_id}/preview")
+    def source_preview(source_id: str, name: str = "", region: str = "A1:J20"):
+        source = store.get(source_id, "source")
+        if source["type"] == "excel":
+            sheet = name or source["sheets"][0]["name"]
+            if sheet not in {item["name"] for item in source["sheets"]}:
+                raise ValueError("UNKNOWN_SHEET")
+            return {"sheet": sheet, "region": region, "cells": read_region(source["path"], sheet, region)}
+        if not name:
+            raise ValueError("TABLE_NAME_REQUIRED")
+        db = database(source_id)
+        try:
+            tables, keys, _, warnings = db.describe([name])
+            return {"tables": tables, "foreign_keys": keys, "warnings": warnings}
+        except ValueError:
+            raise
+        except Exception:
+            raise HTTPException(400, "MYSQL_STRUCTURE_PREVIEW_FAILED") from None
+        finally:
+            db.close()
+
+    @app.post(prefix + "/sources/{source_id}/sample")
+    def source_sample(source_id: str, body: SamplePreviewRequest):
+        db = database(source_id)
+        try:
+            tables, _, _, _ = db.describe([body.table])
+            if len(set(body.columns)) != len(body.columns) or not set(body.columns) <= {
+                column["name"] for column in tables[0]["columns"]
+            }:
+                raise ValueError("UNKNOWN_OR_DUPLICATE_COLUMN")
+            rows = db.sample(body.table, body.columns, body.limit)
+            return {
+                "rows": [
+                    {key: str(value)[:200] if value is not None else None for key, value in row.items()} for row in rows
+                ],
+                "method": "first_rows_not_random",
+                "max_rows": body.limit,
+                "max_value_chars": 200,
+                "sent_to_model": False,
+            }
+        except ValueError:
+            raise
+        except Exception:
+            raise HTTPException(400, "MYSQL_SAMPLE_PREVIEW_FAILED") from None
+        finally:
+            db.close()
+
     @app.get(prefix + "/analyses/{job_id}/logs")
     def task_logs(job_id: str, after: int = 0, limit: int = 200):
         if after < 0 or not 1 <= limit <= 500:
@@ -182,9 +240,13 @@ def create_app(settings=None):
         return store.logs(job_id, after, limit)
 
     @app.get(prefix + "/analyses")
-    def jobs():
+    def jobs(queue: str = "all"):
+        if queue not in ("all", "analysis", "qa"):
+            raise ValueError("INVALID_QUEUE")
         return [
-            {key: value for key, value in job.items() if key not in ("evidence", "draft")} for job in store.list("job")
+            {**{key: value for key, value in job.items() if key not in ("evidence", "draft")}, "queue": job_queue(job)}
+            for job in store.list("job")
+            if queue == "all" or job_queue(job) == queue
         ]
 
     @app.get(prefix + "/analyses/{job_id}")
@@ -328,6 +390,34 @@ def create_app(settings=None):
         store.log(job_id, "task.queued", "问答任务已入队，等待 Worker")
         return {"task_id": job_id, "conversation_id": conversation_id}
 
+    @app.get(prefix + "/conversations")
+    def conversations(snapshot_id: str | None = None, offset: int = 0, limit: int = 20):
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("INVALID_PAGINATION")
+        if snapshot_id:
+            store.get(snapshot_id, "snapshot")
+        tasks = store.list("job")
+        records = []
+        for info in store.list("conversation"):
+            if snapshot_id and info["snapshot_id"] != snapshot_id:
+                continue
+            history = sorted(
+                [job for job in tasks if job.get("conversation_id") == info["id"]], key=lambda job: job["created"]
+            )
+            if not history:
+                continue
+            records.append(
+                {
+                    **info,
+                    "title": history[0]["question"][:100],
+                    "task_count": len(history),
+                    "status": history[-1]["status"],
+                    "updated": history[-1]["created"],
+                }
+            )
+        records.sort(key=lambda info: info["updated"], reverse=True)
+        return {"conversations": records[offset : offset + limit], "total": len(records)}
+
     @app.get(prefix + "/conversations/{conversation_id}")
     def conversation(conversation_id: str):
         info = store.get(conversation_id, "conversation")
@@ -335,6 +425,11 @@ def create_app(settings=None):
             [answer for answer in store.list("answer") if answer["conversation_id"] == conversation_id],
             key=lambda a: a["created"],
         )
+        info["tasks"] = [
+            {key: value for key, value in job.items() if key not in ("draft", "evidence")}
+            for job in sorted(store.list("job"), key=lambda job: job["created"])
+            if job.get("conversation_id") == conversation_id
+        ]
         return info
 
     @app.get(prefix + "/snapshots/{snapshot_id}/exports/{format}")

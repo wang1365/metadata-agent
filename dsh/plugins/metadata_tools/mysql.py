@@ -3,6 +3,7 @@ from contextlib import contextmanager
 
 import regex
 from sqlalchemy import URL, bindparam, create_engine, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def filter_objects(items, query="", match="fuzzy"):
@@ -208,8 +209,23 @@ class MySQL:
         b = " AND ".join(f"t.{self.quote(t)} = s.{self.quote(s)}" for s, t in zip(source_columns, target_columns))
         nonnull = " AND ".join(f"s.{self.quote(c)} IS NOT NULL" for c in source_columns)
         sql = f"SELECT /*+ MAX_EXECUTION_TIME(30000) */ COUNT(*) AS sampled, SUM({nonnull}) AS nonnull_count, SUM(({nonnull}) AND EXISTS(SELECT 1 FROM {self.quote(target)} t WHERE {b})) AS matched FROM (SELECT {a} FROM {self.quote(source)} LIMIT 1000) s"
-        with self.connection() as conn:
-            row = conn.execute(text(sql)).mappings().one()
+        try:
+            with self.connection() as conn:
+                row = conn.execute(text(sql)).mappings().one()
+        except SQLAlchemyError as exc:
+            db_args = getattr(getattr(exc, "orig", None), "args", ())
+            if db_args and db_args[0] == 1267:
+                return {
+                    "skipped": True,
+                    "reason": "COLLATION_MISMATCH",
+                    "db_code": 1267,
+                    "scope": "not_validated",
+                    "proves_constraint": False,
+                    "warnings": [
+                        "String column collations differ; validation skipped. Do not infer a match or change database collation."
+                    ],
+                }
+            raise
         return {key: int(value or 0) for key, value in row.items()} | {
             "method": "first_1000_rows_not_random",
             "scope": "sample_only",

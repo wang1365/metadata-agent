@@ -14,6 +14,19 @@
 
 MySQL 数据源点击“创建分析”后，可按表名片段（模糊匹配，如 `order`）或正则（如 `^(sys_|biz_)`）筛选，再勾选表/视图。支持分页、勾选全部匹配项、跨条件保留选择和移除已选项；每次必须显式选择 1–500 张。列表可浏览超过 500 张表的数据库，筛选后显示匹配数、全库数及已选数。DSH 仅处理选中范围，范围外关联/血缘引用记录告警，不自动扩大任务。REST 调用 `POST /api/v1/analyses` 也须传非空 `tables`，如 `["example_table"]`；Excel 不需要此参数。
 
+数据源列表点击“查看详情”可浏览连接信息、MySQL 表/视图字段与声明索引、Excel Sheet 和指定单元格区域。MySQL 样例需要显式选择字段并点击读取，每次最多20行、20列、每值200字符；只读首批行，不保存到分析快照、不发送给模型。Excel 每次最多预览2000单元格。
+
+分析任务与问答任务在独立标签页展示，并由独立 Worker 队列执行。并发数在根目录 `.env` 中设置，默认各1，范围各1–8，重启后生效：
+
+```dotenv
+METADATA_ANALYSIS_CONCURRENCY=3
+METADATA_QA_CONCURRENCY=2
+```
+
+同一问答会话按顺序执行，其他会话可并发。问答支持 Enter 发送、Shift+Enter 换行，中文输入法确认不会误发；“历史记录”可查看和继续以往会话，包含排队及失败的问题。界面时间统一显示北京时间（Asia/Shanghai），API 仍使用带时区的 UTC 时间。
+
+关系验证遇到 MySQL 1267 排序规则冲突时返回 `COLLATION_MISMATCH` 警告与未验证证据，交给 DSH 标记待复核；不会修改数据库排序规则，也不会把未验证当作匹配成功或零匹配。历史任务的旧错误记录仍保留。
+
 开发调试（Linux/macOS Bash、Windows Git Bash；WSL 需要在 WSL 内安装依赖）：
 
 ```bash
@@ -21,12 +34,12 @@ MySQL 数据源点击“创建分析”后，可按表名片段（模糊匹配�
 bash ./start-dev.sh
 ```
 
-脚本同步 Python 依赖，缺少前端依赖时执行 `npm ci`，同时启动 API、Worker 与 Vite。打开 `http://127.0.0.1:5173`，REST 文档为 `http://127.0.0.1:8000/docs`。前端支持热更新，API 支持自动重载；插件、Skills 和 Worker 代码修改后重启脚本。按 `Ctrl+C` 关闭进程树。
+脚本同步 Python 依赖，缺少前端依赖时执行 `npm ci`，同时启动 API、分析 Worker、问答 Worker 与 Vite。打开 `http://127.0.0.1:5173`，REST 文档为 `http://127.0.0.1:8000/docs`。前端支持热更新，API 支持自动重载；插件、Skills 和 Worker 代码修改后重启脚本。按 `Ctrl+C` 关闭进程树。
 
 端口可在 `.env` 中设置 `METADATA_API_PORT` / `METADATA_UI_PORT`，或在启动环境覆盖。日志位于数据目录的 `dev-logs/`，便于查看 DSH 任务错误。下列命令使用默认本地数据目录：
 
 ```bash
-tail -f data/dev-logs/api.log data/dev-logs/worker.log data/dev-logs/frontend.log
+tail -f data/dev-logs/api.log data/dev-logs/worker-analysis.log data/dev-logs/worker-qa.log data/dev-logs/frontend.log
 ```
 
 任务列表中的“过程日志”可查看 DSH 初始化、模型消息、工具调用及耗时、结果保存、心跳和失败事件，支持筛选、跟随和下载。运行中每 2 秒更新；服务每任务保留最近 5000 条，面板最多显示最近 2000 条。Bash 开发终端同时输出这些安全事件，单独启动 Worker 时也会输出到 stderr；任务目录的 `runner.log` 可用于本机诊断。过程日志不包含模型上下文、工具参数、SQL 或原始样本。

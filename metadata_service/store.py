@@ -21,6 +21,10 @@ def now() -> str:
 TERMINAL = {"succeeded", "partial_success", "failed", "cancelled"}
 
 
+def job_queue(job):
+    return "qa" if job.get("question") else "analysis"
+
+
 class Store:
     def __init__(self, settings):
         self.settings = settings
@@ -183,6 +187,7 @@ class Store:
                 "answer_id": None,
                 "error": None,
                 **extra,
+                "queue": "qa" if extra.get("question") else "analysis",
             },
         )
 
@@ -193,6 +198,50 @@ class Store:
             payload.update(status="running", stage="启动 DSH", execution_id=uid(), started=now())
 
         return self.mutate(job_id, claim)
+
+    def claim_next(self, queue):
+        if queue not in ("analysis", "qa"):
+            raise ValueError("INVALID_QUEUE")
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                rows = (
+                    connection.execute(
+                        select(self.records)
+                        .where(self.records.c.kind == "job")
+                        .order_by(self.records.c.created, self.records.c.id)
+                    )
+                    .mappings()
+                    .all()
+                )
+                active_conversations = {
+                    row["payload"].get("conversation_id")
+                    for row in rows
+                    if row["payload"]["status"] == "running" and job_queue(row["payload"]) == "qa"
+                }
+                chosen = next(
+                    (
+                        row
+                        for row in rows
+                        if row["payload"]["status"] == "queued"
+                        and job_queue(row["payload"]) == queue
+                        and (queue != "qa" or row["payload"].get("conversation_id") not in active_conversations)
+                    ),
+                    None,
+                )
+                if chosen is None:
+                    connection.commit()
+                    return None
+                payload = dict(chosen["payload"])
+                payload.update(status="running", stage="启动 DSH", execution_id=uid(), started=now(), queue=queue)
+                connection.execute(
+                    update(self.records).where(self.records.c.id == chosen["id"]).values(payload=payload)
+                )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        return self.get(chosen["id"], "job")
 
     def active(self, job_id):
         job = self.get(job_id, "job")

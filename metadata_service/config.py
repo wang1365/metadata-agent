@@ -14,11 +14,18 @@ class Settings:
     model: str = field(default_factory=lambda: os.getenv("METADATA_MODEL", "deepseek-v4.1-flash"))
     max_file_bytes: int = 20 * 1024 * 1024
     execution_timeout: int = 1800
+    analysis_concurrency: int = 1
+    qa_concurrency: int = 1
 
     def initialize(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         load_dotenv(ROOT / ".env", override=False)
         load_dotenv(ROOT / "dsh-home-1/.env", override=False)
+        for queue in ("analysis", "qa"):
+            value = int(os.getenv(f"METADATA_{queue.upper()}_CONCURRENCY", getattr(self, queue + "_concurrency")))
+            if not 1 <= value <= 8:
+                raise ValueError(f"METADATA_{queue.upper()}_CONCURRENCY must be between 1 and 8")
+            setattr(self, queue + "_concurrency", value)
         # A local generated secret is never stored in the result database or Git.
         key = os.getenv("METADATA_MASTER_KEY")
         if not key:

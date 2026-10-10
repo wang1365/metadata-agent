@@ -23,7 +23,8 @@ flowchart TB
     UI[测试界面：React / Ant Design / React Flow]
     CLIENT[集成系统 / Swagger]
     API[FastAPI 应用服务]
-    WORKER[任务 Worker：生命周期管理]
+    WORKER[分析队列 Worker：N 个并发槽]
+    QWORKER[问答队列 Worker：M 个并发槽]
     SDK[官方 deepseek-harness-sdk]
     DSH[DSH Runtime：sdk profile + 服务补丁]
     MODEL[阿里百炼]
@@ -38,7 +39,9 @@ flowchart TB
     UI --> API
     CLIENT --> API
     API --> WORKER
+    API --> QWORKER
     WORKER --> SDK
+    QWORKER --> SDK
     SDK --> DSH
     DSH <--> MODEL
     DSH --> SKILLS
@@ -52,6 +55,7 @@ flowchart TB
     CATALOG --> STORE
     API --> STORE
     WORKER --> STORE
+    QWORKER --> STORE
 ```
 
 | 组件 | 技术 | 职责 |
@@ -78,7 +82,7 @@ Python 封装层包名为 `metadata_service`，不是 Agent。它提供 DSH 智�
 
 应用服务发起分析和问答，管理数据源、用户修正、任务队列和结果展示。Worker 管理进程与应用状态，通过 SDK 发送任务消息、接收通知和最终执行状态。
 
-连接测试和范围选择属于接口前置操作，可调用插件的只读 I/O 适配器；结果查询和导出只读取已保存的 DSH 产物。服务层不得直接调用任何业务分析器。上传阶段只验证文件格式、大小和资源限制，不识别业务表块。
+连接测试、范围选择及数据源原始结构/样例预览属于接口前置操作，可调用插件的只读 I/O 适配器；分析结果查询和导出只读取已保存的 DSH 产物。服务层不得直接调用任何业务分析器。上传阶段只验证文件格式、大小和资源限制，不识别业务表块。
 
 Worker 不决定下一步调用哪个工具，不根据模型文本编写工具执行分支。等待用户确认后再发送消息属于业务交互，不属于自建 Agent 循环。
 
@@ -159,7 +163,7 @@ MySQL 的原始表结构支持显式引用交付：`save_findings(findings={}, m
 
 MySQL.describe 使用参数化 information_schema 查询：TABLES、COLUMNS、STATISTICS、KEY_COLUMN_USAGE（连接 REFERENTIAL_CONSTRAINTS）共4次 SELECT；包含视图时再读取 VIEWS，共5次。按 ORDINAL_POSITION、SEQ_IN_INDEX 保留复合键/外键次序、类型、默认值、注释及声明动作，禁止按名称猜测关系。名称仅用于绑定 IN 参数，表及 schema 范围始终限定。缺失对象/字段报错，函数索引暂不投影为普通列索引并返回告警，缺失视图定义告警。参考 [MySQL COLUMNS](https://dev.mysql.com/doc/refman/8.0/en/information-schema-columns-table.html)、[STATISTICS](https://dev.mysql.com/doc/refman/8.0/en/information-schema-statistics-table.html)、[KEY_COLUMN_USAGE](https://dev.mysql.com/doc/refman/8.0/en/information-schema-key-column-usage-table.html) 和 [SQLAlchemy 参数绑定](https://docs.sqlalchemy.org/en/20/core/sqlelement.html#sqlalchemy.sql.expression.bindparam)。查询次数不包含连接设置、事务命令和连接健康检查，不承诺数据库服务端扫描成本或固定端到端加速倍数。
 
-证据缓存仅在同一任务 execution_id 内生效。相同名称集合命中同一原始证据，refresh=true 强制采集；较新的重叠批次阻止复用旧批次。视图 SQL 定义从本轮原始证据复用，通过 get_sql_definition 明确请求后投影为 sql_definition 证据；较新结构缺少定义时不会回退旧 SQL。采集与定义缓存操作在单MCP实例串行化，避免刷新交错。日志明确标示缓存命中，不记录结构内容。新执行重读，不共享业务库缓存。Skill 指导 DSH 优先批量采集、引用提交和仅对具体候选验证，服务层不安排模型并行循环；Worker 仍同时执行一个任务。
+证据缓存仅在同一任务 execution_id 内生效。相同名称集合命中同一原始证据，refresh=true 强制采集；较新的重叠批次阻止复用旧批次。视图 SQL 定义从本轮原始证据复用，通过 get_sql_definition 明确请求后投影为 sql_definition 证据；较新结构缺少定义时不会回退旧 SQL。采集与定义缓存操作在单MCP实例串行化，避免刷新交错。日志明确标示缓存命中，不记录结构内容。新执行重读，不共享业务库缓存。Skill 指导 DSH 优先批量采集、引用提交和仅对具体候选验证，服务层不安排模型分析循环；分析与问答使用独立队列和可配置并发槽位，每个任务仍由独立 DSH 执行。
 
 Worker 仅在 DSH 正常完成且存在本次执行发布的合法快照时，将分析任务标记为成功或部分成功。问答必须存在本次执行保存的合法答案。最终自然语言回答是摘要，不是元数据落库协议。
 
@@ -224,8 +228,12 @@ stateDiagram-v2
 | `POST /sources/excel` | multipart 上传，返回 Source ID |
 | `POST /sources/mysql` | 保存连接参数与加密凭据，返回脱敏的数据源信息 |
 | `POST /sources/{id}/test` | 确定性连接测试，返回版本、可达性和权限告警 |
+| `GET /sources/{id}` | 数据源详情，隐藏密码及本地路径 |
+| `GET /sources/{id}/preview` | name为MySQL表/视图或Excel Sheet；MySQL批量适配器读取单对象原始结构，Excel可指定region（默认A1:J20，最多2000单元格） |
+| `POST /sources/{id}/sample` | MySQL table、columns（1–20且必须存在）、limit（1–20，默认10）；只读首批行，每值截断200字符，sent_to_model=false；不写任务或快照 |
 | `GET /sources/{id}/objects` | MySQL 表/视图名筛选：query（最多256字符）、match=fuzzy/regex、offset、limit（1–500，默认100）；先排序过滤再分页，返回 objects、过滤后 total、全库 source_total；Excel 的已识别对象由草稿接口提供 |
 | `POST /analyses` | 接收 Source ID、范围和分析选项，返回任务 ID |
+| `GET /analyses` | queue=all/analysis/qa筛选队列，默认all；历史任务按question是否存在兼容分类 |
 | `GET /analyses/{id}` | 状态、阶段、预算、告警及快照引用 |
 | `GET /analyses/{id}/logs` | `after` 游标（默认 0）、`limit`（默认 200，最多 500）；返回事件、next_cursor、has_more、truncated、任务状态 |
 | `GET /analyses/{id}/preview` | Excel 表块、映射、草稿版本及证据坐标 |
@@ -238,7 +246,8 @@ stateDiagram-v2
 | `GET /snapshots/{id}/evidence/{evidence_id}` | 查询当前快照的证据 |
 | `PATCH /relationships/{id}` | 审核或更正候选，保存变更记录 |
 | `POST /snapshots/{id}/questions` | 提交问题及可选会话 ID，返回问答任务 ID |
-| `GET /conversations/{id}` | 查询已有问题、答案及证据引用 |
+| `GET /conversations` | 可选snapshot_id筛选，offset/limit（默认20、最大100），返回会话标题、任务次数、最近任务状态及最近提问时间，按时间倒序分页 |
+| `GET /conversations/{id}` | 全部提问任务及状态、已保存答案和证据引用；没有答案的排队/失败任务同样保留 |
 | `GET /snapshots/{id}/exports/{format}` | 下载 JSON/CSV；SVG/PNG 由前端导出当前图 |
 | `POST /analyses/{id}/cleanup` | 仅清理已停止任务的原文件、临时产物和会话；保留快照与明确的证据不可用标记 |
 
@@ -279,7 +288,13 @@ Windows 本机优先，提供一个启动脚本管理 API 和独立 Worker，Wor
 
 开发启动入口为 `bash ./start-dev.sh`：调用 `metadata_service.dev` 同时管理独立 Worker、Uvicorn reload API 和 Vite 前端，避免 Bash/MSYS PID 与 Windows PID 不一致。默认端口 API 8000、UI 5173；`METADATA_API_PORT`、`METADATA_UI_PORT` 可覆盖，前端代理随 API 端口同步。进程日志写入数据目录 `dev-logs/`，退出回收启动的进程树。API/前端热更新，插件、Skills 与 Worker 修改需要重启。Windows 使用 Git Bash，WSL 需使用 WSL 自己的 Python/Node/uv 环境。构建后的单端口入口为 `start-service.ps1` 或 `uv run python -m metadata_service`。
 
-默认一个 Worker、一个活跃任务；任务队列持久化在 SQLite，领取任务使用事务避免重复执行。部署不需要 Redis、系统 Node.js 参与 DSH 执行或图数据库；前端构建需要 Node.js。
+分析与问答各有一个队列管理进程及独立锁（worker-analysis.lock、worker-qa.lock），每个进程使用线程池调度可配置数量的runner子进程；线程只管理生命周期，不执行Agent循环。METADATA_ANALYSIS_CONCURRENCY和METADATA_QA_CONCURRENCY各1–8，默认各1，启动读取，修改后重启；/health返回配置数量，不将其声称为实时模型健康状态。队列持久化在SQLite，Store.claim_next使用BEGIN IMMEDIATE原子查找与领取，避免多槽重复执行；依据question兼容历史任务，并将queue写入新任务。相同会话存在running问答时，跳过该会话的后续queued任务，允许其他会话继续领取。队列重启只将所属running任务标记为中断，不触及另一队列；启动器先初始化SQLite再同时启动队列，停止时回收两个队列和各自runner进程树。部署不需要Redis或图数据库；前端构建需要Node.js。
+
+开发脚本启动API、两个队列Worker及Vite，分别记录worker-analysis.log/worker-qa.log。python -m metadata_service.worker默认启动两个队列；可用--queue analysis/qa单独运行，--once每槽最多处理一个任务用于测试。快照问答继续使用独立DSH会话，提示词包含按时间正序排列的最近10条已保存问答，不读取其他会话。问答历史API和前端QAPanel独立于DSH上下文存储，不把失败任务伪装成答案。
+
+前端统一使用time.ts的Intl.DateTimeFormat（Asia/Shanghai），所有展示从带偏移的ISO时间解析后格式化；数据库及日志传输保持UTC，不做重复加8小时或迁移历史时间。SourceDetails预览只调用原始适配器，样例按需请求后保留在当前组件内存，关窗后释放，不写模型会话/证据库。连接、只读及30秒查询限制沿用适配器。
+
+MySQL.validate捕获原始数据库错误1267（字符串排序规则冲突），返回skipped=true、reason=COLLATION_MISMATCH、scope=not_validated、proves_constraint=false且不含sampled/matched计数。插件保存这条未验证证据，工具完成事件为warning；DSH Skill要求告警和人工复核，不重复同一失败查询，不修改排序规则。其他数据库错误仍走原失败路径；SDK工具错误摘要不再笼统归因为Schema错误。
 
 Worker 为任务创建专属进程组或等效进程树管理对象，正常退出和强制取消均回收 DSH 与 MCP 子进程。启动时校验必需 MCP 工具确实可用，不能只以 DSH 进程启动成功作为就绪条件。
 
@@ -293,7 +308,7 @@ SQLite 独立 `task_events` 表保存有序 `seq`、任务 ID、时间和事件�
 
 `metadata_service.progress.DSHProgress` 订阅官方 SDK `session.event`，投影 `request/header`、`assistant/message`、`turn/end` 的安全摘要，不读取模型正文。`request/header` 是 DSH 任务请求事件，不声称对应每次底层模型 API 调用。`turn/end.data.reason.kind` 映射为安全结束码：max-tokens → DSH_MAX_TOKENS、error → DSH_MODEL_ERROR、cancelled → DSH_CANCELLED；缺少结束事件使用 DSH_NO_TURN_END，工具未观测到使用 DSH_TOOLS_NOT_OBSERVED。日志和任务 error 保留具体代码，非正常结束仍失败且不自动续写。SDK tool/result 的 isError 额外投影为 DSH_TOOL_ERROR，覆盖进入工具函数之前的输入 Schema 校验失败，绝不输出错误原文。MCP 插件 `server.logged_tool` 保留原工具签名、权限与返回值，在真实工具执行前后记录名称、耗时、有限计数或安全错误码；分析、推断和工具选择继续由 DSH 执行。
 
-Worker 记录领取、15 秒心跳、取消/超时/中断，按游标将 runner/MCP 事件转发到自己的 stderr。开发监督进程将 worker.log 中的结构化事件同步输出到终端；runner 本地 stderr 仍保留在任务目录 runner.log。MCP stdout 与 SDK JSON-RPC stdout 不用于普通日志。
+Worker 记录领取、15 秒心跳、取消/超时/中断，按游标将 runner/MCP 事件转发到自己的 stderr。开发监督进程将worker-analysis.log及worker-qa.log中的结构化事件同步输出到终端；runner 本地 stderr 仍保留在任务目录 runner.log。MCP stdout 与 SDK JSON-RPC stdout 不用于普通日志。
 
 API 只交付事件投影，不将原始 runner.log 或 DSH 会话暴露给前端。日志由固定消息、数值、受控工具名和安全错误码构成，不记录自由输入、模型正文、SQL、原始样本、凭据或异常原文。错误原文仍由 DSH 工具协议交回运行时处理；界面错误不会把已恢复的工具失败误当整任务失败。阶段更新检查任务仍运行且未取消，晚到事件可留存但不能改写终态。
 

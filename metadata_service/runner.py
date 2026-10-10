@@ -136,9 +136,10 @@ def run_task(store, job_id):
     home, workspace, env = prepare_runtime(store, job_id)
     store.log(job_id, "runtime.prepared", "运行配置准备完成，即将启动 DSH", stage="初始化 DSH 与 MCP")
     if job.get("question"):
-        history = [answer for answer in store.list("answer") if answer["conversation_id"] == job["conversation_id"]][
-            -10:
-        ]
+        history = sorted(
+            [answer for answer in store.list("answer") if answer["conversation_id"] == job["conversation_id"]],
+            key=lambda answer: answer["created"],
+        )[-10:]
         prompt = (
             "加载 metadata-qa skill。围绕当前绑定快照回答问题并调用 save_answer。历史问答仅作为上下文：\n"
             + json.dumps(history, ensure_ascii=False)

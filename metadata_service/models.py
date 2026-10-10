@@ -135,3 +135,9 @@ class QuestionRequest(StrictModel):
 class ReviewRequest(StrictModel):
     status: Literal["pending", "confirmed", "rejected"]
     note: str = Field(default="", max_length=2000)
+
+
+class SamplePreviewRequest(StrictModel):
+    table: str = Field(min_length=1, max_length=256)
+    columns: list[str] = Field(min_length=1, max_length=20)
+    limit: int = Field(default=10, ge=1, le=20)

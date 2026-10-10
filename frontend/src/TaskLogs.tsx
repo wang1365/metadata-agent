@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Drawer, Empty, Input, Select, Space, Switch, Tag, Typography } from 'antd';
 import { api } from './api';
+import { formatTime } from './time';
 import type { Job } from './types';
 
 interface TaskEvent { seq: number; time: string; execution_id?: string; type: string; level: string; message: string; tool?: string; duration_ms?: number; code?: string; }
@@ -58,7 +59,7 @@ export default function TaskLogs({ job, onClose }: { job: Job; onClose: () => vo
     {(truncated || events.length >= 2000) && <Alert type="warning" message="日志窗口有上限：界面保留最近 2000 条，服务每任务保留最近 5000 条。下载内容为当前窗口。"/>}
     <div className="task-log-list" role="log" aria-label="任务执行事件" aria-live="polite">
       {!visible.length ? <Empty description={logs.isLoading ? '正在读取日志' : '暂无匹配日志；旧版已结束任务无法补录历史事件'}/> : visible.map(event => <div className={`task-log-row task-log-${event.level}`} key={event.seq}>
-        <div><time dateTime={event.time}>{new Date(event.time).toLocaleString('zh-CN', {hour12:false})}</time><Tag color={event.level === 'error' ? 'red' : event.level === 'warning' ? 'gold' : 'blue'}>{event.level}</Tag><code>{event.type}</code>{event.execution_id && <span className="muted"> 执行 {event.execution_id.slice(0,8)}</span>}</div>
+        <div><time dateTime={event.time}>{formatTime(event.time)}</time><Tag color={event.level === 'error' ? 'red' : event.level === 'warning' ? 'gold' : 'blue'}>{event.level}</Tag><code>{event.type}</code>{event.execution_id && <span className="muted"> 执行 {event.execution_id.slice(0,8)}</span>}</div>
         <div>{event.message} {event.tool && <strong className="mono">{event.tool}</strong>} {event.duration_ms !== undefined && <span className="muted"> · {(event.duration_ms/1000).toFixed(2)}s</span>} {event.code && <Tag>{event.code}</Tag>}</div>
       </div>)}<div ref={end}/>
     </div>

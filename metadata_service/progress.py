@@ -77,7 +77,7 @@ class DSHProgress:
                     self.store.log(
                         self.job_id,
                         "dsh.tool_error",
-                        "DSH 收到工具错误；可能为输入 Schema 校验失败，请由 DSH 按契约修正小批结果",
+                        "DSH 收到工具错误，请结合前序工具事件的错误码定位并处理",
                         level="error",
                         tool=name,
                         code="DSH_TOOL_ERROR",

@@ -42,6 +42,9 @@ def logged_tool(store, job_id, name, function):
             )
             raise
         summary = "工具执行完成"
+        skipped = isinstance(result, dict) and result.get("skipped") is True
+        if skipped:
+            summary = "验证已跳过：字段排序规则冲突，未产生匹配结论；需要人工复核"
         if isinstance(result, dict):
             if result.get("cached"):
                 summary += "：复用本轮已采集证据"
@@ -65,6 +68,8 @@ def logged_tool(store, job_id, name, function):
             "tool.completed",
             summary,
             tool=name,
+            level="warning" if skipped else "info",
+            code="COLLATION_MISMATCH" if skipped else None,
             duration_ms=int((time.monotonic() - started) * 1000),
             stage="工具完成，等待 DSH 继续",
         )

@@ -8,11 +8,13 @@ import time
 from contextlib import ExitStack
 
 from .config import ROOT, get_settings
+from .store import Store
 from .worker import stop_tree
 
 
 def main():
     settings = get_settings()
+    Store(settings)
     api_port = int(os.getenv("METADATA_API_PORT", "8000"))
     ui_port = int(os.getenv("METADATA_UI_PORT", "5173"))
     if not (1 <= api_port <= 65535 and 1 <= ui_port <= 65535) or api_port == ui_port:
@@ -22,7 +24,8 @@ def main():
     logs = settings.data_dir / "dev-logs"
     logs.mkdir(exist_ok=True)
     commands = [
-        ("worker", [sys.executable, "-m", "metadata_service.worker"]),
+        ("worker-analysis", [sys.executable, "-m", "metadata_service.worker", "--queue", "analysis"]),
+        ("worker-qa", [sys.executable, "-m", "metadata_service.worker", "--queue", "qa"]),
         (
             "api",
             [
@@ -50,8 +53,12 @@ def main():
 
     signal.signal(signal.SIGTERM, interrupted)
     with ExitStack() as stack:
-        worker_output = stack.enter_context((logs / "worker.log").open("a+", encoding="utf-8"))
-        worker_output.seek(0, 2)
+        worker_outputs = [
+            stack.enter_context((logs / f"worker-{queue}.log").open("a+", encoding="utf-8"))
+            for queue in ("analysis", "qa")
+        ]
+        for output in worker_outputs:
+            output.seek(0, 2)
         try:
             for name, command in commands:
                 log = stack.enter_context((logs / (name + ".log")).open("a", encoding="utf-8"))
@@ -70,9 +77,10 @@ def main():
                 flush=True,
             )
             while True:
-                for line in worker_output.readlines():
-                    if line.startswith("{"):
-                        print(line.rstrip(), flush=True)
+                for output in worker_outputs:
+                    for line in output.readlines():
+                        if line.startswith("{"):
+                            print(line.rstrip(), flush=True)
                 for name, process in processes:
                     if process.poll() is not None:
                         raise RuntimeError(f"{name} exited ({process.returncode}); inspect {logs / (name + '.log')}")

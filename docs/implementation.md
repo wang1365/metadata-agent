@@ -7,7 +7,7 @@
 Python 服务包命名为 `metadata_service`，封装 DSH 能力，不能视为一个独立 Agent。DSH 插件和 Skills 保持在 `dsh/`。
 
 - FastAPI 上传/数据源管理、任务接口、预览修正与确认、快照查询、关系审核、问答与 JSON/字段 CSV 导出。
-- 单 Worker、SQLite 持久化、独立执行目录、官方 SDK 启动 DSH、超时与取消处理。
+- 分析/问答独立 Worker 队列与可配置并发、SQLite 持久化、独立执行目录、官方 SDK 启动 DSH、超时与取消处理。
 - DSH 原生插件 `dsh/plugins/metadata_tools/index.mjs` 委托官方 MCP Client，插件内部提供任务隔离的 Excel/MySQL 证据 I/O、受控只读查询及结果提交工具。
 - DSH 原生 Skills 完成字典解读、关系与 ER 分析、SQL 血缘及问答。Python 无 SQL 血缘解析器，不自动生成关系或血缘；真实约束也由 DSH 根据原始证据整理后提交。
 - Pydantic 校验 DSH 输出的格式、对象及证据引用，保存草稿与快照；语义正确性需要 DSH 场景验收。
@@ -60,3 +60,16 @@ save_findings 增加严格 SchemaReference 参数：DSH 审阅后以证据ID和�
 验证：全部23项测试通过。合成 information_schema 使用 SQLite 执行相同目录 SQL，验证20张普通表固定4次SELECT、视图5次、有序复合键/外键、参数绑定、无效结构、缓存刷新及显式引用，不等于真实MySQL兼容性或大库性能验收。真实 DSH/百炼通过 scripts/smoke_mysql_batch.py 使用合成数据库适配器完成3对象/82字段的引用接收、数据库约束关系、视图血缘和快照发布，未连接业务库。该脚本仅在测试进程改写隔离任务的MCP命令，不向生产插件增加测试后门。没有宣称固定端到端加速倍数。
 
 界面将全部 warnings 移到与“关系与血缘”“表与字段”并列的“分析说明（数量）”标签页，保留原说明内容和空状态，表格页直接展示搜索与表格。TypeScript及生产构建通过；浏览器交互端到端尚未验收。原有包体大小和Starlette弃用提示仍在。
+
+
+## 独立队列、问答历史、北京时间与数据源预览
+
+分析和问答现使用两个独立 Worker 管理进程、独立锁与可配置线程槽位，各任务仍启动独立 runner/DSH 子进程。根目录 .env 中 METADATA_ANALYSIS_CONCURRENCY / METADATA_QA_CONCURRENCY 默认各1、范围1–8，启动时加载。SQLite BEGIN IMMEDIATE 原子领取防重复；同一会话串行，其他会话可并发；恢复仅处理本队列的遗留运行任务。该实现替代上文历史阶段的单任务限制，不实现 Python Agent 循环。
+
+任务页按分析/问答分 Tab，并显示配置并发数。问答新增持久化会话列表、分页与快照筛选，包含尚无答案和失败的问题；支持打开继续会话、Enter 发送、Shift+Enter 换行与输入法保护。DSH 上下文取最近10条已保存答案；界面历史仍完整保留。界面所有任务、快照和日志时间使用 Asia/Shanghai，存储与 API 保持 UTC。
+
+数据源新增详情抽屉与 GET /sources/{id}、GET /sources/{id}/preview、POST /sources/{id}/sample。MySQL 结构预览复用插件原始采集适配器，显式样例读取限制20行/20列/每值200字符；Excel 显示 Sheet 信息和有界区域（最多2000单元格）。预览不启动 DSH，不保存样例或交给模型；不返回密码和文件路径。结构含字段、默认值、注释与声明的键/索引，不产生推断关系。
+
+针对报告的关系验证失败，以原受控只读聚合查询复现 MySQL 1267：两端字符串字段排序规则不同。插件返回 skipped=true / COLLATION_MISMATCH / not_validated / proves_constraint=false，保存未验证证据并输出 warning，不伪造 sampled/matched 计数、不修改数据库、不强制转换排序规则。DSH Skill 要求记录告警和人工复核，其他错误仍保留失败语义。
+
+验证：29项测试覆盖队列原子领取、独立恢复、同会话串行、分析3/问答1同时派发（模拟 runner）、配置边界、历史持久化、预览边界与密码脱敏、1267结构化跳过及真实工具包装日志。真实 DSH/百炼通过新的双队列完成合成 Excel → 确认 → 发布 → 问答。原失败查询的有限只读重放返回 COLLATION_MISMATCH 且无匹配计数；没有自动重跑完整业务分析。时间工具在其他本地时区下验证 UTC 05:02 → 北京13:02和跨日转换。前端 TypeScript、生产构建与 Ruff 检查通过；没有声明新增界面已通过浏览器端到端自动化验收。既有构建包体积及 Starlette 弃用提示仍存在。

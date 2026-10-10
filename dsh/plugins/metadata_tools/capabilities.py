@@ -326,7 +326,10 @@ class Capabilities:
             },
             indicators,
         )
-        return {"validation": indicators, "evidence_ids": [evidence_id]}
+        result = {"validation": indicators, "evidence_ids": [evidence_id]}
+        if indicators.get("skipped"):
+            result.update(skipped=True, reason=indicators["reason"], warnings=indicators.get("warnings", []))
+        return result
 
     def catalog(self):
         job = self.job()

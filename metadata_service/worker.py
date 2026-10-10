@@ -1,13 +1,16 @@
+import argparse
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from threading import Event
 
 from .config import ROOT, get_settings
-from .store import Store
+from .store import Store, job_queue
 
 
 @contextmanager
@@ -46,19 +49,37 @@ def stop_tree(process):
         process.wait(timeout=5)
 
 
-def work(store, once=False):
+def recover_queue(store, queue):
     for job in store.list("job"):
-        if job["status"] == "running":
+        if job["status"] == "running" and job_queue(job) == queue:
             store.update(job["id"], status="failed", stage="执行中断，可显式重试", error="EXECUTION_INTERRUPTED")
-            store.log(job["id"], "task.interrupted", "Worker 重启，原执行中断，可显式重试", level="error")
-    while True:
-        queued = sorted([job for job in store.list("job") if job["status"] == "queued"], key=lambda j: j["created"])
-        if not queued:
+            store.log(job["id"], "task.interrupted", "所属队列 Worker 重启，原执行中断，可显式重试", level="error")
+
+
+def work(store, once=False, queue="analysis"):
+    recover_queue(store, queue)
+    stop = Event()
+    count = getattr(store.settings, queue + "_concurrency")
+    with ThreadPoolExecutor(max_workers=count) as executor:
+        futures = [executor.submit(run_slot, store, stop, once, queue) for _ in range(count)]
+        try:
+            while futures:
+                done, _ = wait(futures, timeout=0.5, return_when=FIRST_EXCEPTION)
+                for future in done:
+                    future.result()
+                futures = [future for future in futures if not future.done()]
+        finally:
+            stop.set()
+
+
+def run_slot(store, stop, once, queue):
+    while not stop.is_set():
+        job = store.claim_next(queue)
+        if job is None:
             if once:
                 return
-            time.sleep(1)
+            stop.wait(1)
             continue
-        job = store.claim(queued[0]["id"])
         store.log(job["id"], "task.started", "Worker 已领取任务，准备启动 DSH 子进程")
         cursor = 0
 
@@ -96,6 +117,13 @@ def work(store, once=False):
                 while process.poll() is None:
                     relay()
                     current = store.get(job["id"], "job")
+                    if stop.is_set():
+                        stop_tree(process)
+                        store.update(
+                            job["id"], status="failed", stage="执行中断，可显式重试", error="EXECUTION_INTERRUPTED"
+                        )
+                        store.log(job["id"], "task.interrupted", "所属队列 Worker 已停止", level="error")
+                        break
                     if current["cancel_requested"] or time.monotonic() - started > store.settings.execution_timeout:
                         stop_tree(process)
                         store.update(
@@ -136,15 +164,57 @@ def work(store, once=False):
             return
 
 
-if __name__ == "__main__":
+def start_workers(env=None, once=False):
+    processes = []
+    try:
+        for queue in ("analysis", "qa"):
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-m", "metadata_service.worker", "--queue", queue] + (["--once"] if once else []),
+                    cwd=ROOT,
+                    env=env,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                    start_new_session=os.name != "nt",
+                )
+            )
+        return processes
+    except BaseException:
+        for process in processes:
+            stop_tree(process)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--queue", choices=("all", "analysis", "qa"), default="all")
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
 
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupted)
     settings = get_settings()
+    if args.queue == "all":
+        Store(settings)  # Initialize SQLite before queue processes start together.
+        processes = start_workers(once=args.once)
+        try:
+            while any(process.poll() is None for process in processes):
+                if not args.once and any(process.poll() is not None for process in processes):
+                    raise RuntimeError("Queue worker exited")
+                time.sleep(0.5)
+            if any(process.returncode for process in processes):
+                raise RuntimeError("Queue worker failed")
+        finally:
+            for process in processes:
+                stop_tree(process)
+    else:
+        with worker_lock(settings.data_dir / f"worker-{args.queue}.lock"):
+            work(Store(settings), once=args.once, queue=args.queue)
+
+
+if __name__ == "__main__":
     try:
-        with worker_lock(settings.data_dir / "worker.lock"):
-            work(Store(settings), once="--once" in sys.argv)
+        main()
     except KeyboardInterrupt:
         pass
